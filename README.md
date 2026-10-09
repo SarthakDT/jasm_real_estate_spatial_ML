@@ -1,63 +1,95 @@
-# JASM Spatial ML
+# Did TSMC's Kumamoto fab move land prices?
 
-A geospatial machine-learning project analyzing land-price dynamics in Kumamoto Prefecture, Japan, centered on the economic-geography effect of the **JASM** semiconductor fab (the TSMC/Sony/Denso joint venture in Kikuyo-cho) on nearby land values, housing affordability, and infrastructure demand.
+A geospatial analysis of Japanese government benchmark land prices (MLIT *Chika-Kouji*, 地価公示) from 2013 to 2026 around the JASM semiconductor fab that TSMC, Sony and Denso built in Kikuyo, Kumamoto.
 
-Kumamoto is in the middle of a real, current policy problem: the fab is driving rapid land-price appreciation and housing pressure in adjacent municipalities, layered on top of unresolved 2016-earthquake and 2020-flood disaster-recovery geography. This project aims to go beyond a single price-prediction model and build toward analysis a prefectural planner could actually use — proximity effects, displacement risk, hazard-aware growth siting, and infrastructure strain forecasts.
+TSMC confirmed the fab in October 2021. MLIT values land as of January 1, so the 2022 valuation is the first that could reflect it.
 
-## Current state
+![Mean annual price change by distance from the fab](docs/figures/distance_bands.png)
 
-The pipeline (`main.py` → `src/`) runs four stages end-to-end:
+## Findings
 
-1. **Ingestion** (`src/load_data.py` → `src/data_sources/chika_kouji.py`) — parses 8 years (2019–2026) of MLIT *Chika-Kouji* (地価公示) benchmark land-price GeoJSON for Kumamoto Prefecture (code 43), builds year-over-year price-transition rows per benchmark plot, validates the schema, writes `data/processed/stage1.csv`.
-2. **Feature engineering** (`src/features.py`) — converts to a GeoDataFrame, computes a vectorized projected-CRS distance and inverse-decay proximity feature to the JASM fab site, the target variable (% price change), and joins static hazard/land-use features from NLNI layers (`src/data_sources/hazards.py`) — flood risk class, landslide zone flag, urban planning zone type. Writes `data/processed/stage2.csv` (flat) and `stage2.geoparquet` (with geometry, for spatial modules).
-3. **Training** (`src/train.py`) — trains and compares **six** models on an identical **spatial-block** train/test split (`src/spatial_cv.py`): the original Random Forest, a tuned XGBoost, a Gaussian Process with an ARD Matérn kernel (`src/models/gp.py`), a mixed-effects model with a random intercept per municipality (`src/models/mixed_effects.py`), and two interpretable spatial-econometrics baselines (`src/models/spatial_baseline.py`) — a spatial-lag model (`spreg.GM_Lag`, in-sample only — see its docstring for why) and a spatial-error model (`spreg.GM_Error`, genuinely evaluated out-of-sample). Writes `models/model_comparison.csv`, always saves the RF to `models/jasm_rf_model.pkl` (backward-compatible), saves whichever model wins to `models/best_model.pkl`, and fits a MAPIE conformal-interval wrapper around the winner — sweeping `plus`/`base`/`minmax` and keeping the tightest that still meets target coverage (`models/mapie_model.pkl`, sweep results in `models/mapie_sweep.json`).
-4. **Evaluation** (`src/evaluate.py`) — reconstructs the identical spatial test split, exports top-5% error anomalies, a feature-importance chart, and Moran's I on both raw prices and the winning model's residuals (`src/spatial_diagnostics.py`, → `data/spatial_diagnostics.json`).
+**Land near the fab appreciated much faster after the announcement.** Plots within 5 km of the fab rose 10–14% a year in 2023–2025, against under 1% a year for plots more than 20 km away. Between the 2021 and 2026 valuations the median plot within 10 km gained 20%, against 5% for the rest of the prefecture.
 
-A standalone **out-of-time backtest** (`src/backtest.py`, run via `python -m src.backtest`) retrains the winning model on data through 2024 and forecasts 2025–2026 against the actuals already sitting in the raw data — a genuine test of forward-looking trust, not just held-out geography.
+| Mean annual change | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
+|---|---|---|---|---|---|---|---|
+| 0–5 km (13–16 plots) | 2.4% | 1.9% | 3.8% | **10.4%** | **13.3%** | **14.1%** | 7.6% |
+| 5–10 km | 1.2% | 0.5% | 0.9% | 2.5% | 3.9% | 4.9% | 3.9% |
+| 10–20 km | 3.3% | 0.8% | 1.2% | 2.0% | 2.9% | 3.5% | 3.9% |
+| 20–40 km | −0.1% | −0.2% | −0.1% | 0.1% | 0.3% | 0.8% | 0.7% |
+| 40+ km | −0.4% | −1.6% | −0.8% | −0.5% | −0.5% | −0.4% | −0.7% |
 
-An interactive Streamlit dashboard (`dashboard.py`) visualizes the geospatial data, model performance, anomalies, and price trends.
+**The jump is attributable to the announcement, not just a general rise.** A difference-in-differences regression compares each plot with its own history and each year with the prefecture-wide market (plot and year fixed effects, standard errors clustered by plot, 271 plots, 3,051 plot-years from 2014 to 2026):
 
-**Honest, load-bearing finding from switching to a spatial-block split**: the original pipeline's plain random 75/25 split reported Test R²=0.626. Nearby benchmark plots are significantly spatially autocorrelated (Moran's I=0.49, p=0.001 on raw prices), so that number was inflated by leakage — a model can partly "memorize" a neighborhood rather than generalize to unseen geography. Under a proper spatial-block split (2 of 8 KMeans-derived blocks held out entirely), Random Forest's Test R² drops to **~0.13**, and a tuned XGBoost overfits outright (Test R² negative) with only ~1,000 spatially-held-out training rows. The **residual Moran's I for the winning model is still 0.575 (p=0.001)** — i.e. even the best model on offer leaves substantial spatial structure unexplained. The **out-of-time backtest tells a more encouraging story**: forecasting 2025 (one year ahead) scores R²≈0.66, though it degrades to R²≈0.26 for 2026 (two years ahead) — the model generalizes across time noticeably better than across untrained geography. All of this is reported directly, not smoothed over, because a government-facing tool that overclaims a single inflated R² is a bigger credibility risk than one that's candid about where it's weak.
-
-**Random Forest stays the production model after real competition, not by default.** A Gaussian Process, a mixed-effects model, and a spatial-error model were all built specifically to try to beat it (see `docs/ANALYSIS_REPORT.md` §9 for the full account) — none did. The GP result is the most instructive: it was built to directly fix the residual-autocorrelation problem above, but its own residual Moran's I came in *higher* (0.73) than RF's, even after two rounds of re-tuning. The mechanism: a stationary spatial kernel has no support for a genuinely unseen spatial block, so it reverts toward the global mean uniformly across every point in that block — which is itself a spatially-correlated error pattern. This is reported as a real negative finding, not hidden.
-
-**Correctness fix**: `src/config.py`'s `MUNI_NAMES` mapping (JIS X0402 municipality code → name) had 11 of 24 codes mislabeled in the original codebase — most importantly, code `43404` (the fab's actual host municipality) was mislabeled "Mashiki-machi" instead of "Kikuyo-cho", and the real Mashiki-machi (`43443`) was mislabeled "Nagomi-machi". Verified and corrected against the official Kumamoto Prefecture municipal code list and a point-in-polygon check of the JASM coordinates against NLNI admin boundary polygons. This only changes display labels, not any model input/output — all metrics are unaffected — but every municipality-level chart/table now shows correct names.
-
-`data/processed/stage2.csv` also carries pre-2021 (pre-fab-announcement) transition rows now, so a future fab-impact event study has a baseline to compare against. Model training itself is unaffected — `train.py`/`evaluate.py` explicitly filter to `years_since_announcement >= 0` before building the feature matrix.
-
-## Data sources & licensing
-
-| Source | Publisher | License |
+| Specification | Extra annual price growth near the fab after 2021 | 95% CI |
 |---|---|---|
-| Chika-Kouji (地価公示) benchmark land prices | MLIT | Japan Public Data License (PDL) 1.0 — commercial use permitted |
-| A31 flood inundation risk zones, A33 landslide hazard zones, A29 urban planning zones, N03 admin boundaries — National Land Numerical Information (国土数値情報) | MLIT | PDL 1.0 |
+| **Within 10 km (main)** | **+3.0 pp** | 1.9 to 4.2 |
+| Within 5 km | +6.6 pp | 4.0 to 9.2 |
+| Within 15 km | +1.2 pp | 0.6 to 1.9 |
+| Pre-period from 2018 (after the earthquake dip) | +3.3 pp | 2.1 to 4.5 |
+| Excluding Kumamoto City | +4.9 pp | 3.0 to 6.8 |
 
-Additional sources planned as part of the current expansion (see Roadmap) — MLIT reinfolib transaction prices, e-Stat demographic and housing-survey data, and PLATEAU building footprints — are all published under PDL 1.0 or equivalent open terms by Japanese government bodies.
+The effect fades with distance and holds in every specification (all p < 0.001).
 
-## Setup
+![Event study](docs/figures/event_study.png)
+
+**The pre-announcement comparison is not perfectly clean, and this is why.** The event study estimates the near-vs-far gap year by year, relative to 2021. Across all plots, near plots grew about 1 pp a year more slowly than the rest in 2017–2020. That came from Kumamoto City in the comparison group, which boomed during the rebuilding after the April 2016 earthquakes and then dipped in the 2021 (COVID) valuation. Without Kumamoto City, the 2014–2020 gaps are flat and indistinguishable from zero, except 2017: the first valuation after the earthquakes, whose epicentre was next to the fab towns. Either way, the post-announcement gaps (up to +7 pp a year) are several times any pre-announcement difference. The effect starts small in 2022, peaks in 2024–2025, and narrows in 2026.
+
+![Price change 2021-2026](docs/figures/fab_map.png)
+
+## How good is the model, honestly?
+
+The project also trains models to predict each plot's annual price change. The original version reported R² = 0.63 from a random train/test split. That number leaked: each plot appears once a year, so the random split put most test plots' other years into training.
+
+Every candidate is now scored on the same three honest splits, next to three baselines that need no model. Rows are post-announcement valuations (2022–2026) that have a previous-year change (1,196 rows).
+
+| R² | Unseen plots | Unseen areas | Forecast 2025–26 | Random rows (leaky, reference only) |
+|---|---|---|---|---|
+| Persistence: this year = last year's change | 0.69 | 0.69 | **0.72** | 0.69 |
+| Municipality-year mean | 0.45 | −0.09 | n/a | 0.47 |
+| Training mean | 0.00 | −0.07 | −0.13 | 0.00 |
+| Random Forest | **0.79** | 0.69 | 0.64 | 0.79 |
+| XGBoost | 0.78 | 0.61 | 0.69 | 0.82 |
+
+- **Unseen plots** (5-fold, grouped by plot): Random Forest beats persistence (R² 0.79 vs 0.69, MAE 0.88 vs 0.96 pp). The plot attributes MLIT records (floor-area ratio, land use, road width, last year's price) help explain *which* plots move.
+- **Unseen areas** (8 spatial blocks, each held out in turn): the models only tie persistence. Annual changes are strongly spatially correlated (Moran's I between 0.44 and 0.58 in every year, p = 0.001), so a held-out area is genuinely hard.
+- **Forecast** (train on 2022–2024, predict 2025 and 2026): **neither model beats persistence.** 2022–2024 were accelerating years near the fab and 2026 slowed sharply, so models trained on the acceleration overshoot. Errors concentrate in Ozu, Kikuyo and Koshi, the towns closest to the fab, and in 2026 they cluster in space (residual Moran's I 0.37), which is the slowdown around the fab. Modelling the deviation from persistence instead of the level did worse (R² 0.46).
+
+![Permutation importance](docs/figures/feature_importance.png)
+
+On the forecast years, shuffling last year's change drops R² by 0.86. Shuffling distance to the fab changes nothing: once a plot's momentum is known, the fab adds no further information about next year. The fab effect shows up in the data as momentum, which is why the difference-in-differences above, not the forecasting model, is the right tool for measuring it.
+
+## Data and validation
+
+- **Source:** MLIT Chika-Kouji benchmark land prices for Kumamoto Prefecture, 2019–2026 releases (about 250 plots a year), plus the price history MLIT publishes with each plot in the 2021 release, which extends the pre-announcement period back to 2013. NLNI flood and landslide hazard zones and administrative boundaries. All published under the Japan Public Data License 1.0.
+- **Plot linkage:** plots are followed across years with MLIT's official plot numbers and the previous-year number each record carries. MLIT renumbers plots and reuses numbers when it replaces a site. Matching on rounded coordinates, as the first version did, silently lost 63 of 1,712 transitions, many at the 2024 switch from the JGD2000 to the JGD2011 datum.
+- **Checked against MLIT's own figures:** from 2022 MLIT publishes each plot's official change rate. The computed change matches it **exactly** for all 1,216 transitions, using MLIT's rounding (`tests/test_mlit_consistency.py`).
+- **Municipality names:** 11 of the 24 municipality codes were mislabelled in the original code, including the fab's host town (43404, Kikuyo). The codes are now checked against the prefecture's official list (`tests/test_muni_validation.py`).
+
+More detail is in [docs/methods.md](docs/methods.md).
+
+## Limitations
+
+- Benchmark prices are appraisals, not transactions, and appraisers see last year's value. That makes changes smoother and more persistent than market prices.
+- Only 17 plots lie within 5 km of the fab, so the estimates closest to the fab have wide intervals.
+- "Near the fab" is defined by straight-line distance. Other investment followed the fab into the same area, such as suppliers, housing and road projects. The estimate is the combined effect of the fab and everything that came with it.
+
+## Running it
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+.venv\Scripts\activate          # or: source .venv/bin/activate
 pip install -r requirements.txt
+
+python scripts/download_data.py  # fetch the MLIT files into data/raw/ (about 50 MB)
+python main.py --all             # run all five stages
+pytest                           # consistency checks plus an end-to-end run
+streamlit run dashboard.py       # interactive dashboard
 ```
 
-Two data sources require a free API key. Copy `.env.example` to `.env` and fill in:
-
-- `REINFOLIB_API_KEY` — register at https://www.reinfolib.mlit.go.jp/api/request
-- `ESTAT_APP_ID` — register at https://www.e-stat.go.jp/api/
-
-(Neither key is required to run the current pipeline — both are only used by data sources being added as part of the expansion described below.)
-
-## Running the pipeline
-
-```bash
-python main.py --all          # run all 4 stages
-python main.py --stage 2      # run a single stage (1-4)
-python -m src.backtest        # out-of-time backtest (train <=2024, forecast 2025-2026)
-streamlit run dashboard.py    # launch the dashboard
-```
-
-## Roadmap
-
-This project is being expanded from a single-model price predictor into a broader Kumamoto policy-analysis tool. **Done**: proper spatial cross-validation and Moran's I diagnostics, a spatial-econometrics baseline alongside the ML models, gradient boosting with uncertainty intervals, an out-of-time backtest against 2025–2026 actuals, NLNI hazard/land-use layers. **Remaining**: three more data sources (MLIT reinfolib transaction prices, e-Stat demographics, PLATEAU building footprints), and four policy-analysis modules (fab proximity event study, affordability/displacement risk index, hazard-aware growth siting, infrastructure strain forecast) surfaced in an expanded dashboard with a what-if predictor and an exportable policy briefing.
+| Stage | Module | Output |
+|---|---|---|
+| 1. Load | `src/data_sources/chika_kouji.py` | one row per plot and year, linked by MLIT plot number |
+| 2. Features | `src/features.py` | annual % change, last year's change, distance to the fab, MLIT plot attributes, hazard flags |
+| 3. Models | `src/train.py` | `data/analysis/model_comparison.csv` |
+| 4. Forecast errors | `src/evaluate.py` | worst forecasts, permutation importance, residual Moran's I |
+| 5. Fab impact | `src/fab_impact.py` | distance bands, difference-in-differences, event study, figures |
