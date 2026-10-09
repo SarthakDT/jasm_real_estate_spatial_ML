@@ -12,7 +12,7 @@ import os
 import joblib
 import pandas as pd
 
-from src import config, evaluate, features, load_data, train
+from src import config, evaluate, fab_impact, features, load_data, train
 
 
 def test_pipeline_end_to_end():
@@ -48,3 +48,12 @@ def test_pipeline_end_to_end():
     # comparison includes a spatial-block split.
     assert diagnostics["observed_change"]["mean_morans_i"] > 0
     assert diagnostics["observed_change"]["max_p_value"] < 0.05
+
+    results = fab_impact.run()
+    main = results["main"]
+    assert main["ci_low"] <= main["estimate_pp"] <= main["ci_high"]
+    assert main["n_near_plots"] > 0
+    years = [row["year"] for row in results["event_study"]]
+    assert fab_impact.REFERENCE_YEAR in years
+    for path in (fab_impact.BANDS_FIGURE, fab_impact.EVENT_STUDY_FIGURE, fab_impact.MAP_FIGURE):
+        assert os.path.isfile(path)
