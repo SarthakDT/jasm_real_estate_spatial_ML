@@ -11,6 +11,7 @@ TEXT_SECONDARY = "#52514e"
 GRID = "#e4e3df"
 NEUTRAL = "#f0efec"
 SERIES = "#2a78d6"          # single-series colour
+CATEGORICAL = ["#2a78d6", "#eb6834", "#1baf7a"]  # fixed order; first three validate all-pairs
 NEGATIVE = "#e34948"        # diverging pole for declines
 # Ordinal blue ramp, darkest = nearest to the fab (validated: monotone
 # lightness, single hue, light end clears 2:1 on SURFACE).
@@ -45,5 +46,5 @@ def title(ax, text: str, subtitle: str | None = None) -> None:
 
 def save(fig, path: str) -> None:
     fig.tight_layout()
-    fig.savefig(path, dpi=150, facecolor=SURFACE)
+    fig.savefig(path, dpi=150, facecolor=SURFACE, bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)

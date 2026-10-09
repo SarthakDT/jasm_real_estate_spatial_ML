@@ -88,8 +88,8 @@ def _plot_permutation_importance(model, model_name: str) -> pd.Series:
     ax.grid(axis="x", color=plot_style.GRID, linewidth=0.8)
     ax.set_xlabel("Drop in forecast R² when the feature is shuffled")
     plot_style.title(ax, f"What drives the {model_name} forecast",
-                     f"Permutation importance on {', '.join(map(str, sorted(test['valuation_year'].unique())))} "
-                     "valuations (not seen in training); bars show ±1 sd over 20 shuffles")
+                     f"Permutation importance on the {test['valuation_year'].min()}–{test['valuation_year'].max()} "
+                     "forecasts, ±1 sd over 20 shuffles")
     os.makedirs(config.FIGURES_DIR, exist_ok=True)
     plot_style.save(fig, config.CHART_PATH)
     return imp["mean"].sort_values(ascending=False)

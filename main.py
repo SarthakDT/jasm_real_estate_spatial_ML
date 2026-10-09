@@ -3,20 +3,21 @@ Run the JASM land-price pipeline.
 
 Usage:
   python main.py --all          # run every stage in order
-  python main.py --stage 1      # run a single stage (1-4)
+  python main.py --stage 5      # run a single stage (1-5)
 """
 
 import argparse
 import sys
 import time
 
-from src import evaluate, features, load_data, train
+from src import evaluate, fab_impact, features, load_data, train
 
 STAGES = {
     1: ("Load MLIT land-price data", load_data.run),
     2: ("Build features", features.run),
     3: ("Train and compare models", train.run),
-    4: ("Evaluate the selected model", evaluate.run),
+    4: ("Analyse forecast errors", evaluate.run),
+    5: ("Estimate the fab's effect on land prices", fab_impact.run),
 }
 
 
