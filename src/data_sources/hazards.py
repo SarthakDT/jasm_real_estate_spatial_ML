@@ -38,8 +38,7 @@ def _require(path: str) -> str:
     if not os.path.isfile(path) and not glob.glob(path):
         raise FileNotFoundError(
             f"Hazard data missing: {path}\n"
-            "Download the NLNI archive(s) from https://nlftp.mlit.go.jp/ksj/ "
-            "and extract into data/raw/hazards/."
+            "Run `python scripts/download_data.py` to fetch the NLNI archives."
         )
     return path
 

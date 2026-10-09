@@ -1,5 +1,5 @@
 """
-Central configuration for the JAST Spatial ML pipeline.
+Central configuration for the JASM land-price pipeline.
 
 All paths, MLIT schema mappings, municipality metadata, and shared
 hyperparameters live here so that ingestion, feature engineering, training,

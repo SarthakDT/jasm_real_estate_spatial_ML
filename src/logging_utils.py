@@ -6,7 +6,7 @@ Previously each stage module (`train.py`, `features.py`, ...) called
 the root logger already has a handler, whichever module `main.py` happened
 to import first silently decided the format for every other stage. This
 module centralizes that: one console handler (matching the original
-`[LEVEL] message` DoD-report format) plus a rotating file handler at
+`[LEVEL] message` format) plus a rotating file handler at
 logs/pipeline.log, configured exactly once regardless of import order.
 
 Also defines the custom SUCCESS/STATUS levels used throughout the pipeline's

@@ -119,15 +119,14 @@ def _plot_feature_importance(model, model_name: str) -> None:
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 def run() -> pd.DataFrame:
-    log.info("Initiating Validation & Interpretability Pipeline...")
+    log.info("Evaluating the selected model.")
 
     model, model_name, df, X_test, y_test = _load_inputs()
 
     # Step B
     eval_df = _build_eval_matrix(model, model_name, df, X_test, y_test)
-    _success("Comprehensive residual calculations mapped across test matrices.")
 
-    # Step C: spatial & temporal slices (computed now, printed after DoD)
+    # Step C: error by municipality and by year
     spatial_slice  = (
         eval_df.groupby("municipality")["abs_error"]
         .mean()
@@ -142,7 +141,7 @@ def run() -> pd.DataFrame:
     # Step D
     anomalies, threshold = _extract_anomalies(eval_df)
     _success(
-        "Spatial blind spots evaluated. Anomaly threshold locked at >= %.2f percentage points.",
+        "Anomaly threshold: >= %.2f percentage points.",
         threshold,
     )
     _success("Top 5%% high-variance predictions exported to %s.", config.ANOMALY_PATH)
@@ -158,10 +157,6 @@ def run() -> pd.DataFrame:
     spatial_diagnostics.run(residual_df=residual_gdf)
     _success("Residual Moran's I computed — see %s.", config.SPATIAL_DIAGNOSTICS_PATH)
 
-    # Step G: DoD status line
-    _status(
-        "Model validation complete. Ready for Stage 5 Production Prep & Repository Packaging."
-    )
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
     print()

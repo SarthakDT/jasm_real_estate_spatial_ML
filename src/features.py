@@ -120,7 +120,7 @@ def _validate(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 def run() -> pd.DataFrame:
-    log.info("Initiating Feature Engineering Pipeline...")
+    log.info("Building features.")
 
     df = _load_stage1()
     gdf = geo_utils.to_gdf(df)
@@ -135,11 +135,7 @@ def run() -> pd.DataFrame:
 
     gdf = _validate(gdf)
 
-    # ── DoD health report ─────────────────────────────────────────────────────
-    _success("Computed vectorized projected-CRS distances to JASM centroid.")
-    _success("Non-linear spatial decay vectors generated and stabilized against zero-division.")
-    _success("Target variable 'target_price_pct_change' computed across all temporal windows.")
-    _status("Cleaned feature matrix cached to %s. Ready for Stage 3 Model Training.", config.STAGE2_PATH)
+    _status("Wrote %s.", config.STAGE2_PATH)
 
     # Save: flat CSV (backward-compatible, no geometry) + geoparquet (with geometry)
     os.makedirs(config.PROCESSED_DIR, exist_ok=True)

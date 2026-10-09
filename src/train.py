@@ -1,5 +1,5 @@
 """
-Stage 3 — Model Architecture & Training
+Stage 3 — Model training and comparison
 JASM Spatial ML  |  Kumamoto MLIT Chika-Kouji land-price dataset
 
 Reads data/processed/stage2.csv, trains and compares five models on an
@@ -108,7 +108,7 @@ def _row(model_name, split, train_metrics=None, test_metrics=None, notes="") -> 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 def run():
-    log.info("Initiating Model Architecture & Training Pipeline...")
+    log.info("Training models.")
 
     df = _load_stage2()
     X = df[config.FEATURE_COLS]

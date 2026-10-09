@@ -37,8 +37,7 @@ def _geojson_path(year: int) -> str:
     if not os.path.isfile(path):
         raise FileNotFoundError(
             f"GeoJSON missing: {path}\n"
-            "Download the MLIT Kumamoto land-price archives and extract them into "
-            "data/raw/chika_kouji/."
+            "Run `python scripts/download_data.py` to fetch the MLIT archives."
         )
     return path
 
@@ -225,7 +224,7 @@ def _validate(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 def run() -> pd.DataFrame:
-    log.info("Initiating Ingestion Pipeline for JASM Spatial ML...")
+    log.info("Loading MLIT Chika-Kouji files for %d-%d.", config.YEARS[0], config.YEARS[-1])
 
     # Load all 8 years
     frames = [_load_year(y) for y in config.YEARS]
@@ -239,10 +238,8 @@ def run() -> pd.DataFrame:
     # Validate and clean
     df = _validate(df)
 
-    # ── DoD health report ─────────────────────────────────────────────────────
-    _success("Verified 0 duplicate records across point_id attributes.")
-    _success("Data frame type matching checked. Coordinate bounding geometry verified.")
-    _status("Cleaned dataset safely cached to %s. Ready for Stage 2.", config.STAGE1_PATH)
+    _success("Validation passed: no duplicate point_ids, all coordinates inside Kumamoto.")
+    _status("Wrote %s.", config.STAGE1_PATH)
 
     # Save
     os.makedirs(config.PROCESSED_DIR, exist_ok=True)
