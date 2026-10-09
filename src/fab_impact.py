@@ -43,11 +43,15 @@ HISTORY_RELEASE_YEAR = 2021      # last release before the announcement
 REFERENCE_YEAR = 2021            # event-study coefficients are relative to this year
 TREATMENT_RADIUS_KM = 10
 EARTHQUAKE_FIRST_VALUATION = 2017  # Kumamoto earthquakes, April 2016
+# Distance rings for estimating how far the effect reaches; plots beyond the
+# last ring are the comparison group.
+RINGS_KM = [(0, 5), (5, 10), (10, 15), (15, 20), (20, 30)]
 BANDS = [(0, 5, "0–5 km"), (5, 10, "5–10 km"), (10, 20, "10–20 km"), (20, 40, "20–40 km"), (40, np.inf, "40+ km")]
 
 DISTANCE_BANDS_PATH = os.path.join(config.ANALYSIS_DIR, "distance_bands.csv")
 DID_RESULTS_PATH = os.path.join(config.ANALYSIS_DIR, "did_results.json")
 PANEL_PATH = os.path.join(config.ANALYSIS_DIR, "price_change_panel.csv")
+CUMULATIVE_PATH = os.path.join(config.ANALYSIS_DIR, "cumulative_change.csv")
 BANDS_FIGURE = os.path.join(config.FIGURES_DIR, "distance_bands.png")
 EVENT_STUDY_FIGURE = os.path.join(config.FIGURES_DIR, "event_study.png")
 MAP_FIGURE = os.path.join(config.FIGURES_DIR, "fab_map.png")
@@ -136,6 +140,44 @@ def event_study(panel: pd.DataFrame, radius_km: float = TREATMENT_RADIUS_KM) -> 
     return pd.DataFrame(rows).sort_values("year").reset_index(drop=True)
 
 
+def ring_estimates(panel: pd.DataFrame, rings=RINGS_KM) -> pd.DataFrame:
+    """
+    Extra annual % change after the announcement for each distance ring,
+    estimated jointly (plot and year fixed effects, errors clustered by plot).
+    Shows how far from the fab the effect reaches.
+    """
+    d = panel.copy()
+    names = []
+    for lo, hi in rings:
+        name = f"ring_{lo}_{hi}"
+        in_ring = d["distance_to_jasm_km"].between(lo, hi, inclusive="left")
+        d[name] = (in_ring & d["post"]).astype(int)
+        names.append(name)
+    fit = _fit("pct_change ~ " + " + ".join(names) + " + C(plot_id) + C(year)", d)
+    ci = fit.conf_int()
+    rows = []
+    for (lo, hi), name in zip(rings, names):
+        in_ring = d["distance_to_jasm_km"].between(lo, hi, inclusive="left")
+        rows.append({"ring": f"{lo}–{hi} km", "estimate_pp": fit.params[name], "ci_low": ci.loc[name, 0],
+                     "ci_high": ci.loc[name, 1], "p_value": fit.pvalues[name],
+                     "n_plots": d.loc[in_ring, "plot_id"].nunique()})
+    return pd.DataFrame(rows)
+
+
+def cumulative_change(frames: dict[int, pd.DataFrame]) -> pd.DataFrame:
+    """Price change from the last pre-announcement valuation to the latest, for plots present in both."""
+    first, last = HISTORY_RELEASE_YEAR, config.YEARS[-1]
+    start = frames[first].set_index("plot_id")["price"].rename("price_first")
+    end = frames[last].set_index("plot_id")
+    plots = end[["muni_code", "use_code", "lot_area_m2", "latitude", "longitude", "price"]].join(start, how="inner")
+    plots = plots.rename(columns={"price": "price_last"})
+    plots["municipality"] = plots["muni_code"].map(config.MUNI_NAMES)
+    plots["land_use"] = plots["use_code"].map(config.LAND_USE_CODES).fillna("other")
+    plots["distance_to_jasm_km"] = geo_utils.distance_to_jasm_km(plots)
+    plots["cum_change"] = (plots["price_last"] / plots["price_first"] - 1) * 100
+    return plots.drop(columns=["muni_code", "use_code"]).reset_index()
+
+
 # ── Figures ───────────────────────────────────────────────────────────────────
 def _mark_events(ax) -> None:
     ymax = ax.get_ylim()[1]
@@ -184,13 +226,9 @@ def plot_event_study(series: dict[str, pd.DataFrame], radius_km: float) -> None:
     plot_style.save(fig, EVENT_STUDY_FIGURE)
 
 
-def plot_map(frames: dict[int, pd.DataFrame], radius_km: float) -> pd.DataFrame:
+def plot_map(plots: pd.DataFrame, radius_km: float) -> None:
     first, last = HISTORY_RELEASE_YEAR, config.YEARS[-1]
-    a = frames[first].set_index("plot_id")["price"]
-    b = frames[last].set_index("plot_id")[["price", "latitude", "longitude"]]
-    plots = b.join(a.rename("price_first"), how="inner")
-    plots["cum_change"] = (plots["price"] / plots["price_first"] - 1) * 100
-    pts = geo_utils.project(geo_utils.to_gdf(plots.reset_index()))
+    pts = geo_utils.project(geo_utils.to_gdf(plots))
     admin = load_admin_boundaries()
     fab = geo_utils.project(geo_utils.to_gdf(pd.DataFrame(
         {"latitude": [config.JASM_COORDINATES[0]], "longitude": [config.JASM_COORDINATES[1]]})))
@@ -225,7 +263,6 @@ def plot_map(frames: dict[int, pd.DataFrame], radius_km: float) -> pd.DataFrame:
     plot_style.title(ax, f"Cumulative price change {first}–{last}",
                      f"{len(pts)} MLIT benchmark plots present in both years")
     plot_style.save(fig, MAP_FIGURE)
-    return plots
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -252,13 +289,17 @@ def run() -> dict:
     outside_city = panel[~panel["municipality"].str.startswith("Kumamoto-shi")]
     es_outside_city = event_study(outside_city)
     plot_event_study({"All plots": es, "Excluding Kumamoto City": es_outside_city}, TREATMENT_RADIUS_KM)
-    cumulative = plot_map(frames, TREATMENT_RADIUS_KM)
+    rings = ring_estimates(panel)
+    cumulative = cumulative_change(frames)
+    cumulative.to_csv(CUMULATIVE_PATH, index=False, encoding="utf-8-sig")
+    plot_map(cumulative, TREATMENT_RADIUS_KM)
 
     results = {
         "treatment_radius_km": TREATMENT_RADIUS_KM,
         "first_post_valuation_year": config.FIRST_POST_VALUATION_YEAR,
         "main": main,
         "robustness": robustness,
+        "rings": rings.to_dict(orient="records"),
         "event_study": es.replace({np.nan: None}).to_dict(orient="records"),
         "event_study_excluding_kumamoto_city": es_outside_city.replace({np.nan: None}).to_dict(orient="records"),
     }
@@ -281,7 +322,10 @@ def run() -> dict:
     both = es.merge(es_outside_city, on="year", suffixes=("_all", "_outside_city"))
     print(both[["year", "estimate_pp_all", "p_value_all", "estimate_pp_outside_city", "p_value_outside_city"]]
           .round(2).to_string(index=False))
-    near = cumulative.join(panel.groupby("plot_id")["distance_to_jasm_km"].first())
+    print()
+    print("  Extra annual % change after 2021 by distance ring")
+    print(rings.round(2).to_string(index=False))
+    near = cumulative
     print()
     print(f"  Median cumulative change {HISTORY_RELEASE_YEAR}-{config.YEARS[-1]}: "
           f"within {TREATMENT_RADIUS_KM} km {near.loc[near['distance_to_jasm_km'] <= TREATMENT_RADIUS_KM, 'cum_change'].median():.1f}%, "

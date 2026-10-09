@@ -18,7 +18,7 @@ from src import config, fab_impact, plot_style, train
 
 st.set_page_config(page_title="TSMC fab and Kumamoto land prices", page_icon=":material/factory:", layout="wide")
 
-REQUIRED = [fab_impact.PANEL_PATH, fab_impact.DISTANCE_BANDS_PATH, fab_impact.DID_RESULTS_PATH,
+REQUIRED = [fab_impact.PANEL_PATH, fab_impact.DISTANCE_BANDS_PATH, fab_impact.DID_RESULTS_PATH, fab_impact.CUMULATIVE_PATH,
             config.MODEL_COMPARISON_PATH, config.FORECAST_PREDICTIONS_PATH]
 FIRST, LAST = fab_impact.HISTORY_RELEASE_YEAR, config.YEARS[-1]
 ANNOUNCE_X = config.FIRST_POST_VALUATION_YEAR - 0.5
@@ -34,16 +34,8 @@ def load_outputs():
     comparison = pd.read_csv(config.MODEL_COMPARISON_PATH)
     forecast = pd.read_csv(config.FORECAST_PREDICTIONS_PATH, encoding="utf-8-sig")
     best_name = open(config.BEST_MODEL_NAME_PATH, encoding="utf-8").read().strip()
-    return panel, bands, did, comparison, forecast, best_name
-
-
-@st.cache_data
-def cumulative_change(panel: pd.DataFrame) -> pd.DataFrame:
-    """Price change from the 2021 to the 2026 valuation for plots present in both."""
-    prices = panel.pivot_table(index="plot_id", columns="year", values="price")
-    out = panel.groupby("plot_id")[["municipality", "latitude", "longitude", "distance_to_jasm_km"]].first()
-    out["cum_change"] = (prices[LAST] / prices[FIRST] - 1) * 100
-    return out.dropna(subset=["cum_change"]).reset_index()
+    cum = pd.read_csv(fab_impact.CUMULATIVE_PATH, encoding="utf-8-sig")
+    return panel, bands, did, comparison, forecast, best_name, cum
 
 
 def event_rules(top: float) -> alt.Chart:
@@ -62,8 +54,7 @@ if not all(os.path.isfile(p) for p in REQUIRED):
     st.error("Pipeline outputs are missing. Run `python scripts/download_data.py` and then `python main.py --all`.")
     st.stop()
 
-panel, bands, did, comparison, forecast, best_name = load_outputs()
-cum = cumulative_change(panel)
+panel, bands, did, comparison, forecast, best_name, cum = load_outputs()
 main = did["main"]
 radius = did["treatment_radius_km"]
 near = cum["distance_to_jasm_km"] <= radius

@@ -6,6 +6,8 @@ TSMC confirmed the fab in October 2021. MLIT values land as of January 1, so the
 
 ![Mean annual price change by distance from the fab](docs/figures/distance_bands.png)
 
+**Stakeholder summary:** [notebooks/findings.ipynb](notebooks/findings.ipynb) explains the findings in plain terms, including what they mean for planners, landowners and investors, and sets out the work needed to make this a decision-grade monitoring tool.
+
 ## Findings
 
 **Land near the fab appreciated much faster after the announcement.** Plots within 5 km of the fab rose 10–14% a year in 2023–2025, against under 1% a year for plots more than 20 km away. Between the 2021 and 2026 valuations the median plot within 10 km gained 20%, against 5% for the rest of the prefecture.
@@ -28,7 +30,7 @@ TSMC confirmed the fab in October 2021. MLIT values land as of January 1, so the
 | Pre-period from 2018 (after the earthquake dip) | +3.3 pp | 2.1 to 4.5 |
 | Excluding Kumamoto City | +4.9 pp | 3.0 to 6.8 |
 
-The effect fades with distance and holds in every specification (all p < 0.001).
+The effect fades with distance and holds in every specification (all p < 0.001). Estimated ring by ring, it is +6.9 pp a year within 5 km, +1.7 pp at 5–10 km, and indistinguishable from zero beyond 10 km.
 
 ![Event study](docs/figures/event_study.png)
 
