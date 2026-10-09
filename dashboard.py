@@ -1,383 +1,230 @@
 """
-JASM Spatial ML — Interactive Dashboard
-Kumamoto Prefecture Chika-Kouji land-price forecasting pipeline.
+Dashboard for the JASM land-price analysis.
 
-Run with:
+Run the pipeline first (`python main.py --all`), then:
     streamlit run dashboard.py
-
-Expects to sit at the project root, alongside data/ and models/.
 """
 
+import json
 import os
 
-import joblib
-import numpy as np
+import altair as alt
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from src import config
-from src.models.predict_dispatch import predict as model_predict
-from src.spatial_cv import spatial_train_test_split
-from src.train import N_SPATIAL_BLOCKS, N_TEST_BLOCKS
+from src import config, fab_impact, plot_style, train
 
-# ── Paths / constants (centralized in src/config.py) ────────────────────────
-STAGE2_PATH = config.STAGE2_PATH
-ANOMALY_PATH = config.ANOMALY_PATH
-MODEL_PATH = config.MODEL_PATH
-FEATURE_COLS = config.FEATURE_COLS
-TARGET_COL = config.TARGET_COL
-JASM_CENTROID = config.JASM_COORDINATES
+st.set_page_config(page_title="TSMC fab and Kumamoto land prices", page_icon=":material/factory:", layout="wide")
 
-# ── Page config ────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="JASM Spatial ML Dashboard",
-    page_icon="🗾",
-    layout="wide",
-)
-
-
-# ── Cached loaders ─────────────────────────────────────────────────────────
-@st.cache_data
-def load_data():
-    if not os.path.isfile(STAGE2_PATH):
-        return None, None
-    df = pd.read_csv(STAGE2_PATH, encoding="utf-8-sig")
-    # stage2.csv includes pre-announcement transition rows (added for the
-    # fab event-study analysis); this dashboard's model-driven tabs only
-    # cover the post-announcement window the model was trained on, matching
-    # src/train.py's filter.
-    df = df[df["years_since_announcement"] >= 0].reset_index(drop=True)
-    anomalies = None
-    if os.path.isfile(ANOMALY_PATH):
-        anomalies = pd.read_csv(ANOMALY_PATH, encoding="utf-8-sig")
-    return df, anomalies
-
-
-@st.cache_resource
-def load_model():
-    # Loads models/best_model.pkl — whichever model won the Stage 3 comparison
-    # (RandomForest / XGBoost / GaussianProcess / MixedEffects / SpatialError)
-    # on the spatial-block test split. Falls back to the always-saved RF at
-    # MODEL_PATH if best_model.pkl isn't present yet.
-    best_path = os.path.join(config.MODEL_DIR, "best_model.pkl")
-    path = best_path if os.path.isfile(best_path) else MODEL_PATH
-    if not os.path.isfile(path):
-        return None, None
-    model_name = "RandomForest"
-    name_path = os.path.join(config.MODEL_DIR, "best_model_name.txt")
-    if path == best_path and os.path.isfile(name_path):
-        model_name = open(name_path, encoding="utf-8").read().strip()
-    return joblib.load(path), model_name
+REQUIRED = [fab_impact.PANEL_PATH, fab_impact.DISTANCE_BANDS_PATH, fab_impact.DID_RESULTS_PATH,
+            config.MODEL_COMPARISON_PATH, config.FORECAST_PREDICTIONS_PATH]
+FIRST, LAST = fab_impact.HISTORY_RELEASE_YEAR, config.YEARS[-1]
+ANNOUNCE_X = config.FIRST_POST_VALUATION_YEAR - 0.5
+QUAKE_X = fab_impact.EARTHQUAKE_FIRST_VALUATION - 0.5
 
 
 @st.cache_data
-def compute_test_split(df: pd.DataFrame):
-    """Reconstruct the identical spatial-block split used in src/train.py —
-    NOT a plain random split, since nearby benchmark plots are spatially
-    autocorrelated (see src/spatial_diagnostics.py) and the model itself was
-    trained on this spatial split, not a random one.
-    """
-    X = df[FEATURE_COLS]
-    y = df[TARGET_COL]
-    train_idx, test_idx, _ = spatial_train_test_split(df, test_blocks=N_TEST_BLOCKS, n_blocks=N_SPATIAL_BLOCKS)
-    return X.iloc[train_idx], X.iloc[test_idx], y.iloc[train_idx], y.iloc[test_idx]
+def load_outputs():
+    panel = pd.read_csv(fab_impact.PANEL_PATH, encoding="utf-8-sig")
+    bands = pd.read_csv(fab_impact.DISTANCE_BANDS_PATH, encoding="utf-8-sig")
+    with open(fab_impact.DID_RESULTS_PATH, encoding="utf-8") as fh:
+        did = json.load(fh)
+    comparison = pd.read_csv(config.MODEL_COMPARISON_PATH)
+    forecast = pd.read_csv(config.FORECAST_PREDICTIONS_PATH, encoding="utf-8-sig")
+    best_name = open(config.BEST_MODEL_NAME_PATH, encoding="utf-8").read().strip()
+    return panel, bands, did, comparison, forecast, best_name
 
 
-# ── Load everything ────────────────────────────────────────────────────────
-df, anomalies_df = load_data()
-model, model_name = load_model()
+@st.cache_data
+def cumulative_change(panel: pd.DataFrame) -> pd.DataFrame:
+    """Price change from the 2021 to the 2026 valuation for plots present in both."""
+    prices = panel.pivot_table(index="plot_id", columns="year", values="price")
+    out = panel.groupby("plot_id")[["municipality", "latitude", "longitude", "distance_to_jasm_km"]].first()
+    out["cum_change"] = (prices[LAST] / prices[FIRST] - 1) * 100
+    return out.dropna(subset=["cum_change"]).reset_index()
 
-if df is None or model is None:
-    st.error(
-        "Couldn't find `data/processed/stage2.csv` and/or `models/jasm_rf_model.pkl`. "
-        "Place `dashboard.py` in the project root (next to `main.py`) and make sure "
-        "the pipeline has been run at least once (`python main.py --all`)."
-    )
+
+def event_rules(top: float) -> alt.Chart:
+    events = pd.DataFrame({"x": [QUAKE_X, ANNOUNCE_X], "label": ["Kumamoto earthquakes", "Fab announced"], "y": [top, top]})
+    rules = alt.Chart(events).mark_rule(strokeDash=[4, 4], color=plot_style.TEXT_SECONDARY).encode(x="x:Q")
+    text = alt.Chart(events).mark_text(align="left", dx=4, dy=8, fontSize=11, color=plot_style.TEXT_SECONDARY).encode(
+        x="x:Q", y=alt.Y("y:Q"), text="label:N")
+    return rules + text
+
+
+def year_axis():
+    return alt.X("year:Q", title=None, axis=alt.Axis(format="d", tickMinStep=1))
+
+
+if not all(os.path.isfile(p) for p in REQUIRED):
+    st.error("Pipeline outputs are missing. Run `python scripts/download_data.py` and then `python main.py --all`.")
     st.stop()
 
-X_train, X_test, y_train, y_test = compute_test_split(df)
-train_pred = model_predict(model, model_name, X_train, df_slice=df.loc[X_train.index])
-test_pred = model_predict(model, model_name, X_test, df_slice=df.loc[X_test.index])
+panel, bands, did, comparison, forecast, best_name = load_outputs()
+cum = cumulative_change(panel)
+main = did["main"]
+radius = did["treatment_radius_km"]
+near = cum["distance_to_jasm_km"] <= radius
+r2 = comparison.pivot(index="model_key", columns="split", values="r2")
 
-train_r2 = r2_score(y_train, train_pred)
-test_r2 = r2_score(y_test, test_pred)
-test_rmse = np.sqrt(mean_squared_error(y_test, test_pred))
-test_mae = mean_absolute_error(y_test, test_pred)
-
-eval_df = X_test.copy()
-eval_df["municipality"] = df.loc[X_test.index, "municipality"]
-eval_df["point_id"] = df.loc[X_test.index, "point_id"]
-eval_df["actual"] = y_test
-eval_df["predicted"] = test_pred
-eval_df["residual"] = eval_df["actual"] - eval_df["predicted"]
-eval_df["abs_error"] = eval_df["residual"].abs()
-
-# ── Sidebar filters ─────────────────────────────────────────────────────────
-st.sidebar.title("🗾 JASM Spatial ML")
-st.sidebar.caption("Kumamoto Chika-Kouji land-price forecasting")
-
-all_munis = sorted(df["municipality"].unique())
-selected_munis = st.sidebar.multiselect(
-    "Municipality", options=all_munis, default=[]
-)
-ysa_min, ysa_max = int(df["years_since_announcement"].min()), int(
-    df["years_since_announcement"].max()
-)
-ysa_range = st.sidebar.slider(
-    "Years since announcement (2021 anchor)",
-    min_value=ysa_min,
-    max_value=ysa_max,
-    value=(ysa_min, ysa_max),
-)
-
-filtered = df.copy()
-if selected_munis:
-    filtered = filtered[filtered["municipality"].isin(selected_munis)]
-filtered = filtered[
-    (filtered["years_since_announcement"] >= ysa_range[0])
-    & (filtered["years_since_announcement"] <= ysa_range[1])
-]
-
-st.sidebar.divider()
-st.sidebar.metric("Rows in view", f"{len(filtered):,}")
-st.sidebar.metric("Municipalities in view", filtered["municipality"].nunique())
-
-# ── Header ───────────────────────────────────────────────────────────────
-st.title("JASM Spatial ML — Model & Data Dashboard")
+st.title("Did TSMC's Kumamoto fab move land prices?")
 st.caption(
-    f"{model_name} forecast of year-over-year benchmark land-price change "
-    "(winner of a 5-model spatial-block comparison — see models/model_comparison.csv), "
-    "Kumamoto Prefecture, 2019–2026 MLIT Chika-Kouji data."
+    "MLIT Chika-Kouji benchmark land prices for Kumamoto Prefecture, 2013–2026. "
+    "TSMC announced the JASM fab in Kikuyo in October 2021; the 2022 valuation is the first after it."
 )
 
-# ── KPI row ─────────────────────────────────────────────────────────────
-k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric("Transition rows", f"{len(df):,}")
-k2.metric("Municipalities", df["municipality"].nunique())
-k3.metric("Train R²", f"{train_r2:.3f}")
-k4.metric("Test R²", f"{test_r2:.3f}")
-k5.metric("Test RMSE (pp)", f"{test_rmse:.2f}")
-k6.metric("Test MAE (pp)", f"{test_mae:.2f}")
+with st.container(horizontal=True):
+    st.metric(f"Extra annual growth within {radius} km", f"{main['estimate_pp']:+.1f} pp",
+              f"95% CI {main['ci_low']:+.1f} to {main['ci_high']:+.1f}", delta_color="off", border=True,
+              help="Difference-in-differences with plot and year fixed effects, standard errors clustered by plot.")
+    st.metric(f"Median price change {FIRST}–{LAST}, within {radius} km", f"{cum.loc[near, 'cum_change'].median():.0f}%",
+              f"{near.sum()} plots", delta_color="off", border=True)
+    st.metric(f"Median price change {FIRST}–{LAST}, farther away", f"{cum.loc[~near, 'cum_change'].median():.0f}%",
+              f"{(~near).sum()} plots", delta_color="off", border=True)
+    st.metric(f"Forecast R², {best_name} vs persistence",
+              f"{r2.loc['xgboost' if best_name == 'XGBoost' else 'random_forest', 'forecast']:.2f}",
+              f"persistence {r2.loc['persistence', 'forecast']:.2f}", delta_color="off", border=True)
 
-st.divider()
-
-tab_geo, tab_perf, tab_anom, tab_trend, tab_data = st.tabs(
-    ["🗺️ Geospatial", "🌲 Model Performance", "🚩 Anomalies", "📈 Price Trends", "📋 Raw Data"]
+tab_impact, tab_models, tab_errors, tab_data = st.tabs(
+    [":material/factory: Fab impact", ":material/leaderboard: Model evaluation",
+     ":material/error: Forecast errors", ":material/table: Data"]
 )
 
-# ── Tab 1: Geospatial ───────────────────────────────────────────────────
-with tab_geo:
-    st.subheader("Benchmark plots colored by year-over-year price change")
-    fig = px.scatter_map(
-        filtered,
-        lat="latitude",
-        lon="longitude",
-        color="target_price_pct_change",
-        size="past_year_price",
-        size_max=18,
-        hover_name="municipality",
-        hover_data={
-            "point_id": True,
-            "past_year_price": ":,",
-            "current_year_price": ":,",
-            "target_price_pct_change": ":.2f",
-            "latitude": False,
-            "longitude": False,
-        },
-        color_continuous_scale="RdYlGn",
-        color_continuous_midpoint=0,
-        zoom=8.2,
-        height=560,
-        map_style="carto-positron",
-    )
-    fig.add_trace(
-        go.Scattermap(
-            lat=[JASM_CENTROID[0]],
-            lon=[JASM_CENTROID[1]],
-            mode="markers+text",
-            marker=dict(size=16, color="black", symbol="star"),
-            text=["JASM fab"],
-            textposition="top center",
-            name="JASM fab centroid",
+# ── Fab impact ────────────────────────────────────────────────────────────────
+with tab_impact:
+    band_order = [b[2] for b in fab_impact.BANDS]
+    with st.container(border=True):
+        st.subheader("Mean annual price change by distance from the fab")
+        top = float(bands["mean_pct_change"].max())
+        lines = alt.Chart(bands).mark_line(point=True, strokeWidth=2).encode(
+            x=year_axis(),
+            y=alt.Y("mean_pct_change:Q", title="Mean annual change (%)"),
+            color=alt.Color("band:N", title="Distance from fab", sort=band_order,
+                            scale=alt.Scale(domain=band_order, range=plot_style.DISTANCE_RAMP)),
+            tooltip=[alt.Tooltip("band:N", title="Distance"), alt.Tooltip("year:Q", format="d"),
+                     alt.Tooltip("mean_pct_change:Q", title="Mean change (%)", format=".1f"),
+                     alt.Tooltip("n_plots:Q", title="Plots")],
         )
-    )
-    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
-    st.plotly_chart(fig, use_container_width=True)
+        zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color=plot_style.TEXT_SECONDARY).encode(y="y:Q")
+        st.altair_chart(zero + lines + event_rules(top), width="stretch")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Spatial decay vs. distance to JASM")
-        fig2 = px.scatter(
-            filtered,
-            x="distance_to_jasm_km",
-            y="spatial_decay",
-            color="target_price_pct_change",
-            color_continuous_scale="RdYlGn",
-            color_continuous_midpoint=0,
-            labels={
-                "distance_to_jasm_km": "Distance to JASM (km)",
-                "spatial_decay": "Spatial decay = 1 / (dist_km + 1)",
-            },
+    with st.container(border=True):
+        st.subheader(f"Event study: plots within {radius} km vs the rest")
+        st.caption(f"Extra annual price change relative to {fab_impact.REFERENCE_YEAR}, with 95% confidence intervals. "
+                   "Including Kumamoto City, near plots lagged in 2017–2020 while the city boomed after the "
+                   "earthquakes; outside the city the pre-announcement years are flat apart from 2017.")
+        es = pd.concat([
+            pd.DataFrame(did["event_study"]).assign(sample="All plots"),
+            pd.DataFrame(did["event_study_excluding_kumamoto_city"]).assign(sample="Excluding Kumamoto City"),
+        ])
+        es["year_shift"] = es["year"] + es["sample"].map({"All plots": -0.12, "Excluding Kumamoto City": 0.12})
+        color = alt.Color("sample:N", title=None, scale=alt.Scale(range=plot_style.CATEGORICAL[:2]))
+        base = alt.Chart(es).encode(x=alt.X("year_shift:Q", title=None, axis=alt.Axis(format="d", tickMinStep=1)),
+                                    color=color)
+        bars = base.mark_rule(strokeWidth=2).encode(y=alt.Y("ci_low:Q", title="Extra annual change (pp)"), y2="ci_high:Q")
+        dots = base.mark_circle(size=70, opacity=1).encode(
+            y="estimate_pp:Q",
+            tooltip=[alt.Tooltip("sample:N"), alt.Tooltip("year:Q", format="d"),
+                     alt.Tooltip("estimate_pp:Q", title="Estimate (pp)", format="+.2f"),
+                     alt.Tooltip("ci_low:Q", title="95% CI low", format="+.2f"),
+                     alt.Tooltip("ci_high:Q", title="95% CI high", format="+.2f")],
         )
-        st.plotly_chart(fig2, use_container_width=True)
-    with c2:
-        st.subheader("Mean abs. price change by municipality")
-        muni_avg = (
-            filtered.groupby("municipality")["target_price_pct_change"]
-            .mean()
-            .sort_values()
-        )
-        fig3 = px.bar(
-            muni_avg,
-            orientation="h",
-            labels={"value": "Mean % price change", "municipality": ""},
-        )
-        fig3.update_layout(showlegend=False)
-        st.plotly_chart(fig3, use_container_width=True)
+        st.altair_chart(zero + bars + dots + event_rules(float(es["ci_high"].max())), width="stretch")
 
-# ── Tab 2: Model performance ─────────────────────────────────────────────
-with tab_perf:
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        st.subheader("Feature importance")
-        if hasattr(model, "feature_importances_"):
-            importances = pd.Series(model.feature_importances_, index=FEATURE_COLS).sort_values()
-            fig4 = px.bar(
-                importances,
-                orientation="h",
-                labels={"value": "Importance", "index": ""},
-                color=importances.values,
-                color_continuous_scale="Blues",
+    col_map, col_table = st.columns([3, 2])
+    with col_map:
+        with st.container(border=True):
+            st.subheader(f"Price change {FIRST}–{LAST}")
+            fig = px.scatter_map(
+                cum, lat="latitude", lon="longitude", color="cum_change", hover_name="municipality",
+                hover_data={"cum_change": ":.1f", "distance_to_jasm_km": ":.1f", "latitude": False, "longitude": False},
+                labels={"cum_change": "Change (%)", "distance_to_jasm_km": "Distance to fab (km)"},
+                color_continuous_scale=[plot_style.NEGATIVE, plot_style.NEUTRAL, plot_style.SERIES, plot_style.DISTANCE_RAMP[0]],
+                color_continuous_midpoint=0, zoom=8, height=520, map_style="carto-positron",
             )
-            fig4.update_layout(showlegend=False, coloraxis_showscale=False)
-            st.plotly_chart(fig4, use_container_width=True)
-        else:
-            st.info(f"{model_name} doesn't expose feature_importances_ (only tree-ensemble models do).")
+            fig.add_trace(go.Scattermap(lat=[config.JASM_COORDINATES[0]], lon=[config.JASM_COORDINATES[1]],
+                                        mode="markers+text", marker={"size": 14, "color": "black"},
+                                        text=["JASM fab"], textposition="top right", name="JASM fab", showlegend=False))
+            fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
+            st.plotly_chart(fig, width="stretch")
+    with col_table:
+        with st.container(border=True):
+            st.subheader("Difference-in-differences")
+            st.caption("Average extra annual % change near the fab after 2021.")
+            did_table = pd.DataFrame([main] + did["robustness"])[
+                ["label", "estimate_pp", "ci_low", "ci_high", "p_value", "n_near_plots"]]
+            st.dataframe(
+                did_table, hide_index=True, width="stretch",
+                column_config={
+                    "label": st.column_config.TextColumn("Specification", width="large"),
+                    "estimate_pp": st.column_config.NumberColumn("Estimate (pp)", format="%+.2f"),
+                    "ci_low": st.column_config.NumberColumn("CI low", format="%+.2f"),
+                    "ci_high": st.column_config.NumberColumn("CI high", format="%+.2f"),
+                    "p_value": st.column_config.NumberColumn("p", format="%.1e"),
+                    "n_near_plots": st.column_config.NumberColumn("Near plots"),
+                },
+            )
 
-    with c2:
-        st.subheader("Actual vs. predicted (test set)")
-        fig5 = px.scatter(
-            eval_df,
-            x="actual",
-            y="predicted",
-            color="abs_error",
-            color_continuous_scale="Oranges",
-            hover_data=["municipality", "point_id"],
-            labels={"actual": "Actual % change", "predicted": "Predicted % change"},
-        )
-        lo = min(eval_df["actual"].min(), eval_df["predicted"].min())
-        hi = max(eval_df["actual"].max(), eval_df["predicted"].max())
-        fig5.add_trace(
-            go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", name="Perfect prediction",
-                        line=dict(dash="dash", color="gray"))
-        )
-        st.plotly_chart(fig5, use_container_width=True)
-
-    st.subheader("Residual distribution")
-    fig6 = px.histogram(eval_df, x="residual", nbins=40)
-    fig6.add_vline(x=0, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig6, use_container_width=True)
-
-    with st.expander("Model & split details"):
-        st.write(
-            f"""
-            - Model: **{model_name}** — winner of a 5-model spatial-block comparison
-              (RandomForest, XGBoost, GaussianProcess, MixedEffects, SpatialError) on
-              held-out Test R² in `models/model_comparison.csv` (Stage 3)
-            - Split: spatial-block ({N_TEST_BLOCKS} of {N_SPATIAL_BLOCKS} KMeans-derived
-              spatial blocks held out) — NOT a random split, since nearby plots are
-              spatially autocorrelated (see the Moran's I diagnostics in
-              `data/spatial_diagnostics.json`)
-            - Train/test rows: {len(X_train):,} / {len(X_test):,}
-            - Features used: {", ".join(FEATURE_COLS)}
-            - Target: `target_price_pct_change` = ((current − past) / past) × 100
-            """
-        )
-
-# ── Tab 3: Anomalies ───────────────────────────────────────────────────
-with tab_anom:
-    st.subheader("Top 5% highest-error predictions (test set)")
-    threshold = eval_df["abs_error"].quantile(0.95)
-    live_anomalies = eval_df[eval_df["abs_error"] >= threshold].sort_values(
-        "abs_error", ascending=False
+# ── Model evaluation ─────────────────────────────────────────────────────────
+with tab_models:
+    st.markdown(
+        "Every candidate is scored on the same splits. The random-row split is shown only for reference: "
+        "it puts other years of the same plot in training and flatters every model."
     )
-    st.caption(f"Live-computed threshold: abs_error ≥ {threshold:.2f} pp — {len(live_anomalies)} rows")
+    metric = st.segmented_control("Metric", ["r2", "mae", "rmse"], default="r2",
+                                  format_func={"r2": "R²", "mae": "MAE (pp)", "rmse": "RMSE (pp)"}.get)
+    table = comparison.pivot(index="model", columns="split_label", values=metric or "r2")
+    table = table.reindex(index=list(train.CANDIDATES.values()), columns=list(train.SPLITS.values()))
+    st.dataframe(table, width="stretch", column_config={c: st.column_config.NumberColumn(format="%.3f") for c in table.columns})
+    st.caption("Municipality-year mean is not available for the forecast split: same-year means do not exist yet "
+               "when forecasting.")
 
-    display_df = live_anomalies[
-        ["point_id", "municipality", "latitude", "longitude", "past_year_price",
-         "years_since_announcement", "actual", "predicted", "residual", "abs_error"]
-    ].reset_index(drop=True)
-    st.dataframe(
-        display_df.style.format(
-            {
-                "latitude": "{:.5f}",
-                "longitude": "{:.5f}",
-                "past_year_price": "¥{:,.0f}",
-                "actual": "{:.2f}",
-                "predicted": "{:.2f}",
-                "residual": "{:.2f}",
-                "abs_error": "{:.2f}",
-            }
-        ),
-        use_container_width=True,
-        height=380,
-    )
+    with st.container(border=True):
+        st.subheader("What drives the forecast")
+        st.image(config.CHART_PATH)
 
-    fig7 = px.scatter_map(
-        live_anomalies,
-        lat="latitude",
-        lon="longitude",
-        color="abs_error",
-        size="abs_error",
-        hover_name="municipality",
-        color_continuous_scale="Reds",
-        zoom=8.2,
-        height=480,
-        map_style="carto-positron",
-    )
-    fig7.update_layout(margin=dict(l=0, r=0, t=0, b=0))
-    st.plotly_chart(fig7, use_container_width=True)
+# ── Forecast errors ──────────────────────────────────────────────────────────
+with tab_errors:
+    forecast["abs_error"] = forecast["residual"].abs()
+    forecast["persistence_abs_error"] = (forecast["actual"] - forecast["pred_persistence"]).abs()
+    year = st.segmented_control("Valuation year", sorted(forecast["valuation_year"].unique()),
+                                default=int(forecast["valuation_year"].max()), format_func=str)
+    view = forecast if year is None else forecast[forecast["valuation_year"] == year]
 
-    csv = display_df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "Download anomalies as CSV", csv, "evaluation_anomalies_live.csv", "text/csv"
-    )
+    col_a, col_b = st.columns(2)
+    with col_a:
+        with st.container(border=True):
+            st.subheader(f"Actual vs predicted ({best_name})")
+            lo, hi = float(min(view["actual"].min(), view["predicted"].min())), float(max(view["actual"].max(), view["predicted"].max()))
+            diag = alt.Chart(pd.DataFrame({"x": [lo, hi]})).mark_line(strokeDash=[4, 4], color=plot_style.TEXT_SECONDARY).encode(x="x:Q", y="x:Q")
+            pts = alt.Chart(view).mark_circle(size=40, color=plot_style.SERIES, opacity=0.7).encode(
+                x=alt.X("actual:Q", title="Actual change (%)"), y=alt.Y("predicted:Q", title="Predicted change (%)"),
+                tooltip=["municipality", alt.Tooltip("actual:Q", format=".1f"), alt.Tooltip("predicted:Q", format=".1f"),
+                         alt.Tooltip("pred_persistence:Q", title="Persistence", format=".1f")])
+            st.altair_chart(diag + pts, width="stretch")
+    with col_b:
+        with st.container(border=True):
+            st.subheader("Where the errors are")
+            fig = px.scatter_map(view, lat="latitude", lon="longitude", color="abs_error", size="abs_error",
+                                 hover_name="municipality", color_continuous_scale=plot_style.DISTANCE_RAMP[::-1],
+                                 labels={"abs_error": "|error| (pp)"}, zoom=8, height=380, map_style="carto-positron")
+            fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
+            st.plotly_chart(fig, width="stretch")
 
-# ── Tab 4: Price trends ───────────────────────────────────────────────
-with tab_trend:
-    st.subheader("Price trajectory by municipality")
-    trend_munis = st.multiselect(
-        "Municipalities to plot",
-        options=all_munis,
-        default=all_munis[:5],
-        key="trend_muni_select",
-    )
-    if trend_munis:
-        trend_df = df[df["municipality"].isin(trend_munis)].copy()
-        trend_df["year"] = 2021 + trend_df["years_since_announcement"]
-        agg = trend_df.groupby(["municipality", "year"])["current_year_price"].mean().reset_index()
-        fig8 = px.line(
-            agg, x="year", y="current_year_price", color="municipality", markers=True,
-            labels={"current_year_price": "Mean current-year price (¥/m²)"},
-        )
-        st.plotly_chart(fig8, use_container_width=True)
-    else:
-        st.info("Pick at least one municipality above.")
+    with st.container(border=True):
+        st.subheader("Mean absolute error by municipality")
+        by_muni = (view.groupby("municipality")[["abs_error", "persistence_abs_error"]].mean()
+                   .assign(plots=view.groupby("municipality").size()).sort_values("abs_error", ascending=False))
+        st.dataframe(by_muni, width="stretch", column_config={
+            "abs_error": st.column_config.NumberColumn(f"{best_name} (pp)", format="%.2f"),
+            "persistence_abs_error": st.column_config.NumberColumn("Persistence (pp)", format="%.2f"),
+        })
 
-    st.subheader("Distribution of % price change by years-since-announcement")
-    fig9 = px.box(
-        filtered, x="years_since_announcement", y="target_price_pct_change",
-        points="outliers",
-        labels={"years_since_announcement": "Years since 2021 announcement",
-                "target_price_pct_change": "% price change"},
-    )
-    st.plotly_chart(fig9, use_container_width=True)
-
-# ── Tab 5: Raw data ───────────────────────────────────────────────────
+# ── Data ─────────────────────────────────────────────────────────────────────
 with tab_data:
-    st.subheader("Filtered processed_stage2.csv")
-    st.dataframe(filtered, use_container_width=True, height=500)
-    st.caption(f"{len(filtered):,} of {len(df):,} rows shown (sidebar filters applied)")
+    munis = st.multiselect("Municipality", sorted(panel["municipality"].dropna().unique()))
+    shown = panel if not munis else panel[panel["municipality"].isin(munis)]
+    st.dataframe(shown, hide_index=True, width="stretch", height=500)
+    st.caption(f"{len(shown):,} plot-years. Source: MLIT Chika-Kouji (地価公示), Japan Public Data License 1.0.")
