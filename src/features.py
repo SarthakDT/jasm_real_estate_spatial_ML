@@ -25,7 +25,7 @@ def _status(msg, *args):  status(log, msg, *args)
 
 STAGE1_COLUMNS = {
     "point_id", "municipality", "latitude", "longitude",
-    "past_year_price", "current_year_price", "years_since_announcement",
+    "past_year_price", "current_year_price", "valuation_year", "post_announcement",
 }
 
 

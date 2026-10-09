@@ -42,7 +42,11 @@ WGS84 = "EPSG:4326"
 PROJECTED_CRS = "EPSG:6670"
 
 # ── Kumamoto / JASM domain constants ─────────────────────────────────────────
-ANNOUNCEMENT_YEAR = 2021
+# TSMC confirmed its Kumamoto fab plan in October 2021. MLIT benchmark prices
+# are valuations as of January 1, so the 2021 values predate the announcement
+# and 2022 is the first valuation that could reflect it.
+ANNOUNCEMENT_DATE = "2021-10"
+FIRST_POST_VALUATION_YEAR = 2022
 YEARS = list(range(2019, 2027))
 LAT_MIN, LAT_MAX = 32.0, 33.2
 LON_MIN, LON_MAX = 130.0, 131.2
@@ -51,13 +55,62 @@ LON_MIN, LON_MAX = 130.0, 131.2
 # Kikuyo-cho, Kumamoto.
 JASM_COORDINATES = (32.8715, 130.8250)
 
-# MLIT GeoJSON column names shifted twice across the 2019-2026 data releases.
-# Verified by inspecting the first feature of each year's file.
+# MLIT L01 GeoJSON property keys per release era. The column layout changed in
+# 2022 (published change rate added) and again in 2024 (municipality code moved
+# to the front and previous-year municipality added). Positions were checked
+# against the element names in each era's GML file and against value ranges in
+# all eight years.
 _SCHEMA: dict[tuple, dict] = {
-    (2019, 2021): {"year": "L01_005", "price": "L01_006", "muni_code": "L01_021"},
-    (2022, 2023): {"year": "L01_005", "price": "L01_006", "muni_code": "L01_022"},
-    (2024, 2026): {"year": "L01_007", "price": "L01_008", "muni_code": "L01_001"},
+    (2019, 2021): {
+        "use_code": "L01_001", "serial": "L01_002",
+        "prev_use_code": "L01_003", "prev_serial": "L01_004",
+        "year": "L01_005", "price": "L01_006", "site_status": "L01_007",
+        "muni_code": "L01_021", "lot_area_m2": "L01_024", "current_use": "L01_025",
+        "road_width_m": "L01_038", "station_name": "L01_045", "station_distance_m": "L01_046",
+        "zoning": "L01_047", "planning_area": "L01_049", "bcr": "L01_052", "far": "L01_053",
+    },
+    (2022, 2023): {
+        "use_code": "L01_001", "serial": "L01_002",
+        "prev_use_code": "L01_003", "prev_serial": "L01_004",
+        "year": "L01_005", "price": "L01_006", "published_change_pct": "L01_007",
+        "site_status": "L01_008",
+        "muni_code": "L01_022", "lot_area_m2": "L01_026", "current_use": "L01_027",
+        "road_width_m": "L01_041", "station_name": "L01_048", "station_distance_m": "L01_049",
+        "zoning": "L01_050", "planning_area": "L01_052", "bcr": "L01_056", "far": "L01_057",
+    },
+    (2024, 2026): {
+        "muni_code": "L01_001", "use_code": "L01_002", "serial": "L01_003",
+        "prev_muni_code": "L01_004", "prev_use_code": "L01_005", "prev_serial": "L01_006",
+        "year": "L01_007", "price": "L01_008", "published_change_pct": "L01_009",
+        "site_status": "L01_010",
+        "lot_area_m2": "L01_027", "current_use": "L01_028",
+        "road_width_m": "L01_042", "station_name": "L01_048", "station_distance_m": "L01_050",
+        "zoning": "L01_051", "planning_area": "L01_053", "bcr": "L01_057", "far": "L01_058",
+    },
 }
+
+# Each record also carries the plot's price history: a "selected year" flag
+# string (one character per year from 1983, "1" = the site was a benchmark that
+# year) followed by one price column per year from 1983. Values are
+# (flag column, property number of the 1983 price) per era.
+_HISTORY: dict[tuple, tuple] = {
+    (2019, 2021): ("L01_055", 56),
+    (2022, 2023): ("L01_060", 61),
+    (2024, 2026): ("L01_061", 62),
+}
+HISTORY_FIRST_YEAR = 1983
+
+# MLIT land-use category (用途区分) codes found in the Kumamoto files.
+LAND_USE_CODES = {
+    "000": "residential",
+    "003": "prospective residential",  # 宅地見込地
+    "005": "commercial",
+    "009": "industrial",
+}
+
+# 都市計画区域区分: urbanization promotion area, urbanization control area,
+# and planning areas with no such split.
+PLANNING_AREAS = {"市街化": "urbanization", "調区": "control", "非線引": "undivided"}
 
 # JIS X 0402 municipality codes present in Kumamoto prefecture (43) dataset.
 #
@@ -102,7 +155,7 @@ FEATURE_COLS = [
     "latitude",
     "longitude",
     "past_year_price",
-    "years_since_announcement",
+    "valuation_year",
     "distance_to_jasm_km",
     "spatial_decay",
 ]

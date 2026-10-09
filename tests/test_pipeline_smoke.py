@@ -20,7 +20,7 @@ def test_pipeline_end_to_end():
     assert os.path.isfile(config.STAGE1_PATH)
     stage1 = pd.read_csv(config.STAGE1_PATH, encoding="utf-8-sig")
     assert len(stage1) > 0
-    assert stage1["years_since_announcement"].min() >= -2
+    assert stage1["valuation_year"].min() == config.YEARS[0] + 1
 
     features.run()
     assert os.path.isfile(config.STAGE2_PATH)

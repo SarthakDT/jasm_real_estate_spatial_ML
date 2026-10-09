@@ -81,8 +81,8 @@ def _load_stage2() -> pd.DataFrame:
     # fab event-study analysis has a pre-2021 baseline — see
     # src/data_sources/chika_kouji.py). Model training is restricted to the
     # post-announcement window so this refactor doesn't change training data.
-    df = df[df["years_since_announcement"] >= 0].reset_index(drop=True)
-    log.info("Filtered to years_since_announcement >= 0: %d rows.", len(df))
+    df = df[df["post_announcement"]].reset_index(drop=True)
+    log.info("Filtered to post-announcement valuations (2022+): %d rows.", len(df))
     return df
 
 
@@ -168,7 +168,7 @@ def run():
     comparison_rows.append(_row(
         "GaussianProcess", "spatial-block", gp_train_metrics, gp_test_metrics,
         "ARD Matern(nu=1.5) kernel over standardized [x_m, y_m, past_year_price, "
-        "years_since_announcement, distance_to_jasm_km, spatial_decay] + WhiteKernel.",
+        "valuation_year, distance_to_jasm_km, spatial_decay] + WhiteKernel.",
     ))
     candidates["GaussianProcess"] = (gp_model, gp_test_metrics)
 

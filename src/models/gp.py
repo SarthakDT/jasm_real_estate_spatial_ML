@@ -20,7 +20,7 @@ precisely the mechanism that produces high spatial autocorrelation in the
 residuals: nearby points end up with similar, systematically-biased errors.
 This is a different, and here worse, failure mode than RF's plain
 overfitting — RF's axis-aligned tree splits can still exploit non-spatial
-features (past_year_price, years_since_announcement) for an unseen region;
+features (past_year_price, valuation_year) for an unseen region;
 a short-length-scale GP effectively can't once it's outside its kernel's
 support. The configuration below (moderate regularization, redundant
 columns dropped) is kept as the "best attempted" version and as a genuinely

@@ -11,10 +11,10 @@ from src import config
 
 
 def validate_kumamoto_bbox(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = "longitude") -> pd.Series:
-    """Return a boolean mask of rows falling outside the Kumamoto WGS84 bounding box.
+    """Return a boolean mask of rows falling outside Kumamoto Prefecture's bounding box.
 
-    Points outside this box indicate possible Tokyo Datum contamination
-    (~400-450 m positional drift), the same check chika_kouji.py has always run.
+    A coarse sanity check for swapped or garbled coordinates. It is far too
+    loose to detect a datum shift.
     """
     return (
         ~df[lat_col].between(config.LAT_MIN, config.LAT_MAX, inclusive="neither")

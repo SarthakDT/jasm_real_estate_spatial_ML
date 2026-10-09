@@ -60,8 +60,8 @@ def _load_inputs():
 
     # Mirror src/train.py's filter: stage2.csv includes pre-announcement rows
     # (for the fab event-study analysis) but the model was trained only on
-    # years_since_announcement >= 0.
-    df = df[df["years_since_announcement"] >= 0].reset_index(drop=True)
+    # post-announcement valuations (2022+).
+    df = df[df["post_announcement"]].reset_index(drop=True)
 
     X = df[config.FEATURE_COLS]
     y = df[config.TARGET_COL]
@@ -133,7 +133,7 @@ def run() -> pd.DataFrame:
         .sort_values(ascending=False)
     )
     temporal_slice = (
-        eval_df.groupby("years_since_announcement")["abs_error"]
+        eval_df.groupby("valuation_year")["abs_error"]
         .mean()
         .sort_values()
     )
@@ -169,9 +169,9 @@ def run() -> pd.DataFrame:
     for muni, err in spatial_slice.head(8).items():
         print(f"    {muni:<30} {err:.4f} pp")
     print()
-    print("  Mean Abs Error by Years Since Announcement:")
+    print("  Mean Abs Error by valuation year:")
     for ysa, err in temporal_slice.items():
-        print(f"    YSA={int(ysa)}  {err:.4f} pp")
+        print(f"    {int(ysa)}  {err:.4f} pp")
 
     return eval_df
 

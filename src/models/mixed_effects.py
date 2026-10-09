@@ -26,7 +26,7 @@ import statsmodels.formula.api as smf
 from src import config
 
 FORMULA = (
-    "target_price_pct_change ~ past_year_price + years_since_announcement "
+    "target_price_pct_change ~ past_year_price + valuation_year "
     "+ distance_to_jasm_km + spatial_decay"
 )
 GROUP_COL = "municipality"

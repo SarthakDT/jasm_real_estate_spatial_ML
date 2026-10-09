@@ -1,6 +1,5 @@
 """
-Out-of-time backtest: train on years_since_announcement <= 3 (calendar year
-<= 2024) and forecast years_since_announcement in {4, 5} (2025-2026) — both
+Out-of-time backtest: train on valuation years <= 2024 and forecast 2025-2026 — both
 already sitting in the raw MLIT data. This is what actually answers "should a
 planner trust a 2027+ forecast from this model," which in-sample or
 spatial-holdout Test R^2 alone cannot: it's a genuine test against years the
@@ -27,8 +26,8 @@ log = get_logger(__name__)
 
 BEST_MODEL_PATH = os.path.join(config.MODEL_DIR, "best_model.pkl")
 BEST_MODEL_NAME_PATH = os.path.join(config.MODEL_DIR, "best_model_name.txt")
-TRAIN_MAX_YSA = 3   # calendar year 2024
-HOLDOUT_YSAS = (4, 5)  # calendar years 2025, 2026
+TRAIN_MAX_YEAR = 2024
+HOLDOUT_YEARS = (2025, 2026)
 
 
 def run() -> pd.DataFrame:
@@ -43,21 +42,20 @@ def run() -> pd.DataFrame:
         model_name = open(BEST_MODEL_NAME_PATH, encoding="utf-8").read().strip()
 
     df = pd.read_csv(config.STAGE2_PATH, encoding="utf-8-sig")
-    df = df[df["years_since_announcement"] >= 0].reset_index(drop=True)
-    df["calendar_year"] = config.ANNOUNCEMENT_YEAR + df["years_since_announcement"]
+    df = df[df["post_announcement"]].reset_index(drop=True)
+    df["calendar_year"] = df["valuation_year"]
 
-    train_mask = df["years_since_announcement"] <= TRAIN_MAX_YSA
-    holdout_mask = df["years_since_announcement"].isin(HOLDOUT_YSAS)
+    train_mask = df["valuation_year"] <= TRAIN_MAX_YEAR
+    holdout_mask = df["valuation_year"].isin(HOLDOUT_YEARS)
 
     X, y = df[config.FEATURE_COLS], df[config.TARGET_COL]
     X_train, y_train = X[train_mask], y[train_mask]
     X_holdout, y_holdout = X[holdout_mask], y[holdout_mask]
 
     log.info(
-        "Backtest: retraining %s on %d rows (<=%d, i.e. through calendar year %d), "
+        "Backtest: retraining %s on %d rows (through %d), "
         "forecasting %d holdout rows (calendar years %s).",
-        model_name, len(X_train), TRAIN_MAX_YSA, config.ANNOUNCEMENT_YEAR + TRAIN_MAX_YSA,
-        len(X_holdout), sorted(config.ANNOUNCEMENT_YEAR + ysa for ysa in HOLDOUT_YSAS),
+        model_name, len(X_train), TRAIN_MAX_YEAR, len(X_holdout), list(HOLDOUT_YEARS),
     )
 
     df_train = df.loc[X_train.index]
@@ -65,7 +63,7 @@ def run() -> pd.DataFrame:
     backtest_model = model_refit(model_name, winner_model, X_train, y_train, df_train=df_train)
 
     preds = model_predict(backtest_model, model_name, X_holdout, df_slice=df_holdout)
-    result = df.loc[holdout_mask, ["point_id", "municipality", "calendar_year", "years_since_announcement"]].copy()
+    result = df.loc[holdout_mask, ["point_id", "municipality", "calendar_year"]].copy()
     result["actual"] = y_holdout.values
     result["predicted"] = preds
     result["residual"] = result["actual"] - result["predicted"]

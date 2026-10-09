@@ -62,7 +62,7 @@ def run(residual_df: gpd.GeoDataFrame | None = None) -> dict:
     by whichever training/evaluation step has just produced predictions.
     """
     gdf = gpd.read_parquet(config.STAGE2_GEOPARQUET_PATH)
-    gdf = gdf[gdf["years_since_announcement"] >= 0].reset_index(drop=True)
+    gdf = gdf[gdf["post_announcement"]].reset_index(drop=True)
 
     results = {"raw_price_change": compute_morans_i(gdf, config.TARGET_COL)}
     log.info("Raw target Moran's I: %s", results["raw_price_change"]["interpretation"])
