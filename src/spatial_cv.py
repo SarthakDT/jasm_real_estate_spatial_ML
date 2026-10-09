@@ -1,17 +1,14 @@
 """
 Spatial block cross-validation.
 
-Plain random train/test splitting leaks information for spatially
-autocorrelated data: nearby benchmark plots share unobserved local shocks
-(a new road, a school district, a rezoning), so a model can partly
-"memorize" a neighborhood rather than generalize to unseen geography. This
-module replaces `train_test_split` with block-based splitting, where whole
-spatial clusters are held out together.
+Nearby benchmark plots share local shocks (a new road, a rezoning, the fab),
+so a model can do well on a random split by recognising a neighbourhood it
+has already seen. Holding out whole spatial blocks tests whether it can
+predict areas it has not seen at all.
 
-Blocks are assigned via KMeans on projected (meters) coordinates rather than
-by municipality: Kumamoto-shi's 5 wards are all close to each other and all
-fab-adjacent, so municipality-level grouping would not actually separate
-near/far geography the way this dataset needs.
+Blocks are KMeans clusters of projected (metre) coordinates rather than
+municipalities: Kumamoto-shi's five wards are small, adjacent and all close
+to the fab, so municipality groups would not separate near from far.
 """
 
 import numpy as np
@@ -32,10 +29,9 @@ def assign_spatial_blocks(df, lat_col: str = "latitude", lon_col: str = "longitu
 
 
 class SpatialBlockKFold(BaseCrossValidator):
-    """K-fold splitter where each fold holds out one whole spatial block.
+    """K-fold splitter where each fold holds out whole spatial blocks.
 
     Usage mirrors sklearn's GroupKFold: pass `groups=block_ids` to `split()`.
-    Compatible with cross_val_score / GridSearchCV / RandomizedSearchCV.
     """
 
     def __init__(self, n_splits: int = N_BLOCKS):
@@ -55,17 +51,3 @@ class SpatialBlockKFold(BaseCrossValidator):
         for held_out_blocks in block_folds:
             test_mask = np.isin(groups, held_out_blocks)
             yield indices[~test_mask], indices[test_mask]
-
-
-def spatial_train_test_split(df, test_blocks: int = 2, n_blocks: int = N_BLOCKS):
-    """One-shot spatial holdout: assign blocks, hold out `test_blocks` of them as the test set.
-
-    Returns (train_idx, test_idx, block_ids) — positional indices into df.
-    """
-    block_ids = assign_spatial_blocks(df, n_blocks=n_blocks)
-    rng = np.random.RandomState(config.RANDOM_STATE)
-    unique_blocks = np.unique(block_ids)
-    held_out = rng.choice(unique_blocks, size=test_blocks, replace=False)
-    test_mask = np.isin(block_ids, held_out)
-    indices = np.arange(len(df))
-    return indices[~test_mask], indices[test_mask], block_ids

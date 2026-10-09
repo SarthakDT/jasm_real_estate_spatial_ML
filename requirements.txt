@@ -1,29 +1,23 @@
-geopy==2.5.0
 joblib==1.5.3
 matplotlib==3.11.1
 numpy==2.4.6
 pandas==3.0.5
 scikit-learn==1.9.0
+xgboost==3.2.0
 streamlit==1.61.0
 plotly==6.9.0
 python-dotenv==1.2.2
 requests==2.34.2
 
-# Spatial ML stack (Phase 1)
+# Geospatial
 geopandas==1.1.4
 shapely==2.1.2
 pyproj==3.7.2
 pyarrow==24.0.0    # geoparquet I/O
 
-# Spatial CV / econometrics / gradient boosting / uncertainty (Phase 2)
-# NOTE: mapie's API changed substantially between 0.x and 1.x
-# (MapieRegressor -> CrossConformalRegressor et al.) — src/models/uncertainty.py
-# targets the 1.x API pinned here, not 0.9.x.
+# Spatial statistics (Moran's I) and the difference-in-differences regression
 esda==2.9.0
 libpysal==4.14.1
-spreg==1.9.0
-xgboost==3.2.0
-mapie==1.4.1
 statsmodels==0.14.6
 
 # Dev / testing

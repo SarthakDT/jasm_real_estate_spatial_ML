@@ -1,89 +1,120 @@
 """
 Stage 3 — Model training and comparison
-JASM Spatial ML  |  Kumamoto MLIT Chika-Kouji land-price dataset
 
-Reads data/processed/stage2.csv, trains and compares five models on an
-identical spatial-block train/test split — not a plain random split, which
-would leak information given how spatially autocorrelated these prices are
-(see src/spatial_diagnostics.py):
+Compares Random Forest and XGBoost against three naive baselines on
+post-announcement valuations (2022-2026) that have a previous-year change.
+Each candidate is scored on the same evaluation splits:
 
-  - RandomForest        original baseline hyperparameters
-  - XGBoost             tuned via spatial-block RandomizedSearchCV
-  - GaussianProcess     ARD Matern kernel over projected coordinates + other
-                         features — a direct answer to the diagnosed problem
-                         that RF's residuals carry MORE spatial
-                         autocorrelation than the raw target (see the
-                         gp_residual_diagnostics.json check below)
-  - MixedEffects        random intercept per municipality (partial pooling),
-                         targets the small-sample-per-municipality imbalance
-  - SpatialError (GM_Error)  interpretable spatial-econometrics baseline,
-                         genuinely evaluated out-of-sample (unlike GM_Lag,
-                         see src/models/spatial_baseline.py)
+  unseen_plots   5-fold CV grouped by plot: predict plots never seen in training
+  unseen_areas   8 KMeans spatial blocks, one held out per fold: predict whole
+                 areas never seen in training
+  forecast       train on 2022-2024, predict 2025 and 2026 (each one year ahead
+                 of the latest change the model is given)
+  random_rows    plain 5-fold CV over rows. Reported for reference only: each
+                 plot appears once per year, so a random split puts the same
+                 plot's other years in training and flatters every model.
 
-Plus GM_Lag, fit in-sample only (its endogenous spatial-lag term makes
-honest out-of-sample prediction a real simultaneity problem — see
-src/models/spatial_baseline.py) — reported for its coefficient table, not
-competing for "winner."
-
-Writes models/model_comparison.csv, always serializes the Random Forest to
-models/jasm_rf_model.pkl (backward-compatible with the existing dashboard
-tab), and separately serializes whichever model wins on spatial-held-out
-Test R^2 (among the five genuinely out-of-sample candidates) to
-models/best_model.pkl, plus a MAPIE conformal-interval wrapper (method swept
-across plus/base/minmax, see src/models/uncertainty.py) around the winner to
-models/mapie_model.pkl.
+Writes data/analysis/model_comparison.csv (one row per split and candidate)
+and the forecast-split predictions of every candidate. The better of RF and
+XGBoost on the forecast split is saved twice (as the plain sklearn/xgboost
+estimator): fitted on 2022-2024 only
+(models/forecast_model.pkl, used by Stage 4 to explain forecast errors) and
+fitted on all rows (models/best_model.pkl).
 """
 
-import json
 import math
 import os
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import GroupKFold, KFold
 
-from src import config, geo_utils, spatial_diagnostics
-from src.logging_utils import get_logger, success, status
-from src.models import gbm, gp, mixed_effects, rf, spatial_baseline, uncertainty
-from src.spatial_cv import spatial_train_test_split
+from src import config
+from src.logging_utils import get_logger, status
+from src.models import baselines, gbm, rf
+from src.spatial_cv import N_BLOCKS, SpatialBlockKFold, assign_spatial_blocks
 
 log = get_logger(__name__)
 
-def _success(msg, *args): success(log, msg, *args)
-def _status(msg, *args):  status(log, msg, *args)
+
+def _status(msg, *args): status(log, msg, *args)
 
 
-BEST_MODEL_NAME_PATH = os.path.join(config.MODEL_DIR, "best_model_name.txt")
-MAPIE_MODEL_PATH = os.path.join(config.MODEL_DIR, "mapie_model.pkl")
-GP_RESIDUAL_DIAGNOSTICS_PATH = os.path.join(config.DATA_DIR, "gp_residual_diagnostics.json")
-N_SPATIAL_BLOCKS = 8
-N_TEST_BLOCKS = 2
+N_FOLDS = 5
+
+SPLITS = {
+    "unseen_plots": "Unseen plots (5-fold, grouped by plot)",
+    "unseen_areas": f"Unseen areas ({N_BLOCKS} spatial blocks)",
+    "forecast": f"Forecast (train 2022-{config.FORECAST_TRAIN_MAX_YEAR}, predict later years)",
+    "random_rows": "Random rows (leaky, reference only)",
+}
+
+CANDIDATES = {
+    "persistence": "Persistence (last year's change)",
+    "muni_year_mean": "Municipality-year mean",
+    "training_mean": "Training mean",
+    "random_forest": "Random Forest",
+    "xgboost": "XGBoost",
+}
+ML_MODELS = ("random_forest", "xgboost")
 
 
-# ── Step A: Load & validate Stage 2 input ────────────────────────────────────
-def _load_stage2() -> pd.DataFrame:
+class FeatureModel:
+    """Adapts an sklearn regressor to the fit(df, y) / predict(df) interface of the baselines."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+
+    def fit(self, df: pd.DataFrame, y: pd.Series) -> "FeatureModel":
+        X = df[config.FEATURE_COLS]
+        if self.kind == "xgboost":
+            self.estimator_, self.params_ = gbm.build_and_tune(X, y, groups=df["plot_id"])
+        else:
+            self.estimator_ = rf.build_model().fit(X, y)
+            self.params_ = config.RF_PARAMS
+        return self
+
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        return self.estimator_.predict(df[config.FEATURE_COLS])
+
+    @property
+    def feature_importances_(self):
+        return self.estimator_.feature_importances_
+
+
+def _make_candidate(key: str):
+    if key in ML_MODELS:
+        return FeatureModel(key)
+    return baselines.build_baselines()[CANDIDATES[key]]
+
+
+def load_model_rows() -> pd.DataFrame:
     if not os.path.isfile(config.STAGE2_PATH):
-        raise FileNotFoundError(
-            f"Stage 2 output missing: {config.STAGE2_PATH}\n"
-            "Run src/features.py first to generate the feature matrix."
-        )
+        raise FileNotFoundError(f"Stage 2 output missing: {config.STAGE2_PATH}. Run stage 2 first.")
     df = pd.read_csv(config.STAGE2_PATH, encoding="utf-8-sig")
-    required = set(config.FEATURE_COLS) | {config.TARGET_COL}
-    missing = required - set(df.columns)
+    missing = (set(config.FEATURE_COLS) | {config.TARGET_COL, "plot_id"}) - set(df.columns)
     if missing:
-        raise ValueError(
-            f"Stage 2 CSV is missing required columns: {missing}\n"
-            "Re-run src/features.py to regenerate a valid stage2.csv."
-        )
-    log.info("Loaded %d rows from %s.", len(df), config.STAGE2_PATH)
-
-    # stage2.csv now includes pre-announcement transition pairs (added so the
-    # fab event-study analysis has a pre-2021 baseline — see
-    # src/data_sources/chika_kouji.py). Model training is restricted to the
-    # post-announcement window so this refactor doesn't change training data.
-    df = df[df["post_announcement"]].reset_index(drop=True)
-    log.info("Filtered to post-announcement valuations (2022+): %d rows.", len(df))
+        raise ValueError(f"stage2.csv is missing columns: {missing}. Re-run stage 2.")
+    # Model on post-announcement valuations only; pre-announcement years are
+    # the baseline for the fab-impact analysis, not training data.
+    df = df[df["post_announcement"] & df["prev_year_pct_change"].notna()].reset_index(drop=True)
+    log.info("Model rows: %d (valuations %d-%d with a previous-year change).",
+             len(df), df["valuation_year"].min(), df["valuation_year"].max())
     return df
+
+
+def make_splits(df: pd.DataFrame) -> dict[str, list[tuple[np.ndarray, np.ndarray]]]:
+    idx = np.arange(len(df))
+    blocks = assign_spatial_blocks(df, n_blocks=N_BLOCKS)
+    in_train_years = (df["valuation_year"] <= config.FORECAST_TRAIN_MAX_YEAR).to_numpy()
+    return {
+        "unseen_plots": list(GroupKFold(n_splits=N_FOLDS).split(idx, groups=df["plot_id"])),
+        "unseen_areas": list(SpatialBlockKFold(n_splits=N_BLOCKS).split(idx, groups=blocks)),
+        "forecast": [(idx[in_train_years], idx[~in_train_years])],
+        "random_rows": list(KFold(n_splits=N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE).split(idx)),
+    }
 
 
 def _metrics(y_true, y_pred) -> dict:
@@ -91,200 +122,79 @@ def _metrics(y_true, y_pred) -> dict:
         "r2": r2_score(y_true, y_pred),
         "rmse": math.sqrt(mean_squared_error(y_true, y_pred)),
         "mae": mean_absolute_error(y_true, y_pred),
+        "n": len(y_true),
     }
 
 
-def _row(model_name, split, train_metrics=None, test_metrics=None, notes="") -> dict:
-    return {
-        "model": model_name,
-        "split": split,
-        "train_r2": train_metrics["r2"] if train_metrics else None,
-        "test_r2": test_metrics["r2"] if test_metrics else None,
-        "test_rmse": test_metrics["rmse"] if test_metrics else None,
-        "test_mae": test_metrics["mae"] if test_metrics else None,
-        "notes": notes,
-    }
-
-
-# ── Main pipeline ─────────────────────────────────────────────────────────────
-def run():
-    log.info("Training models.")
-
-    df = _load_stage2()
-    X = df[config.FEATURE_COLS]
+def evaluate_split(df: pd.DataFrame, folds, key: str) -> np.ndarray:
+    """Out-of-fold predictions of one candidate (NaN for rows never in a test fold)."""
     y = df[config.TARGET_COL]
-    _success("Feature Matrix (X) and Target Vector (Y) separated cleanly.")
+    pred = np.full(len(df), np.nan)
+    for train_idx, test_idx in folds:
+        model = _make_candidate(key).fit(df.iloc[train_idx], y.iloc[train_idx])
+        pred[test_idx] = model.predict(df.iloc[test_idx])
+    return pred
 
-    # Step B: Spatial-block train/test split (replaces plain train_test_split —
-    # see src/spatial_cv.py for why a random split leaks for this dataset).
-    train_idx, test_idx, block_ids = spatial_train_test_split(
-        df, test_blocks=N_TEST_BLOCKS, n_blocks=N_SPATIAL_BLOCKS
-    )
-    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-    block_ids_train = block_ids[train_idx]
-    _success(
-        "Spatial-block partitioning completed: %d training rows | %d testing rows "
-        "(%d of %d spatial blocks held out).",
-        len(X_train), len(X_test), N_TEST_BLOCKS, N_SPATIAL_BLOCKS,
-    )
 
-    comparison_rows = []
-    candidates = {}  # name -> (model, test_metrics) for genuinely out-of-sample models only
+def run() -> pd.DataFrame:
+    log.info("Training and comparing models.")
+    df = load_model_rows()
+    y = df[config.TARGET_COL]
+    splits = make_splits(df)
 
-    # ── Random Forest (original baseline, unchanged hyperparameters) ─────────
-    rf_model = rf.build_model()
-    rf_model.fit(X_train, y_train)
-    rf_train_metrics = _metrics(y_train, rf_model.predict(X_train))
-    rf_test_metrics = _metrics(y_test, rf_model.predict(X_test))
-    _success("RandomForestRegressor trained on the spatial-block training split.")
-    comparison_rows.append(_row(
-        "RandomForest", "spatial-block", rf_train_metrics, rf_test_metrics,
-        "Original baseline hyperparameters (n_estimators=100, max_depth=7).",
-    ))
-    candidates["RandomForest"] = (rf_model, rf_test_metrics)
+    rows = []
+    forecast_preds = {}
+    for split, folds in splits.items():
+        for key, name in CANDIDATES.items():
+            # Same-year municipality means do not exist yet when forecasting.
+            if split == "forecast" and key == "muni_year_mean":
+                continue
+            pred = evaluate_split(df, folds, key)
+            scored = ~np.isnan(pred)
+            rows.append({"split": split, "split_label": SPLITS[split], "model_key": key, "model": name,
+                         **_metrics(y[scored], pred[scored])})
+            if split == "forecast":
+                forecast_preds[key] = pred
+        log.info("  %s done.", SPLITS[split])
 
+    comparison = pd.DataFrame(rows)
+    os.makedirs(config.ANALYSIS_DIR, exist_ok=True)
+    comparison.to_csv(config.MODEL_COMPARISON_PATH, index=False)
+    _status("Wrote %s.", config.MODEL_COMPARISON_PATH)
+
+    # Pick the better ML model on the forecast split and save it.
+    forecast_r2 = comparison[comparison["split"] == "forecast"].set_index("model_key")["r2"]
+    best = max(ML_MODELS, key=lambda k: forecast_r2[k])
+    train_idx, test_idx = splits["forecast"][0]
+    forecast_model = FeatureModel(best).fit(df.iloc[train_idx], y.iloc[train_idx])
+    final_model = FeatureModel(best).fit(df, y)
     os.makedirs(config.MODEL_DIR, exist_ok=True)
-    joblib.dump(rf_model, config.MODEL_PATH)
-    _status("Random Forest serialized to %s (backward-compatible path).", config.MODEL_PATH)
+    joblib.dump(forecast_model.estimator_, config.FORECAST_MODEL_PATH)
+    joblib.dump(final_model.estimator_, config.BEST_MODEL_PATH)
+    with open(config.BEST_MODEL_NAME_PATH, "w", encoding="utf-8") as fh:
+        fh.write(CANDIDATES[best])
 
-    # ── XGBoost (tuned via spatial-block RandomizedSearchCV) ─────────────────
-    xgb_model, best_params = gbm.build_and_tune(X_train, y_train, block_ids_train)
-    xgb_train_metrics = _metrics(y_train, xgb_model.predict(X_train))
-    xgb_test_metrics = _metrics(y_test, xgb_model.predict(X_test))
-    _success("XGBRegressor tuned via spatial-block RandomizedSearchCV: best_params=%s", best_params)
-    comparison_rows.append(_row(
-        "XGBoost", "spatial-block", xgb_train_metrics, xgb_test_metrics,
-        f"Tuned params: {best_params}",
-    ))
-    candidates["XGBoost"] = (xgb_model, xgb_test_metrics)
+    test = df.iloc[test_idx][["point_id", "plot_id", "municipality", "valuation_year", "latitude",
+                              "longitude", "distance_to_jasm_km", config.TARGET_COL]].copy()
+    test = test.rename(columns={config.TARGET_COL: "actual"})
+    for key, pred in forecast_preds.items():
+        test[f"pred_{key}"] = pred[test_idx]
+    test["predicted"] = test[f"pred_{best}"]
+    test["residual"] = test["actual"] - test["predicted"]
+    test.to_csv(config.FORECAST_PREDICTIONS_PATH, index=False, encoding="utf-8-sig")
+    _status("Saved %s (best on forecast split) and its forecast-split predictions.", CANDIDATES[best])
 
-    # ── Gaussian Process (ARD Matern kernel, spatially aware by construction) ─
-    gp_model = gp.build_model()
-    gp_model.fit(X_train, y_train)
-    gp_train_metrics = _metrics(y_train, gp_model.predict(X_train))
-    gp_test_metrics = _metrics(y_test, gp_model.predict(X_test))
-    _success("GaussianProcessRegressor (ARD Matern kernel) trained on the spatial-block training split.")
-    comparison_rows.append(_row(
-        "GaussianProcess", "spatial-block", gp_train_metrics, gp_test_metrics,
-        "ARD Matern(nu=1.5) kernel over standardized [x_m, y_m, past_year_price, "
-        "valuation_year, distance_to_jasm_km, spatial_decay] + WhiteKernel.",
-    ))
-    candidates["GaussianProcess"] = (gp_model, gp_test_metrics)
-
-    # Acceptance criterion for this model (independent of whether it wins
-    # outright on Test R^2): does its spatial kernel actually reduce residual
-    # spatial autocorrelation relative to RF's 0.575?
-    gp_test_residual_gdf = geo_utils.to_gdf(df.loc[X_test.index].copy())
-    gp_test_residual_gdf["residual"] = y_test.to_numpy() - gp_model.predict(X_test)
-    gp_residual_diagnostics = spatial_diagnostics.compute_morans_i(gp_test_residual_gdf, "residual")
-    with open(GP_RESIDUAL_DIAGNOSTICS_PATH, "w", encoding="utf-8") as fh:
-        json.dump(gp_residual_diagnostics, fh, indent=2, ensure_ascii=False)
-    _success("GP residual Moran's I: %s", gp_residual_diagnostics["interpretation"])
-
-    # ── Mixed-effects (random intercept per municipality, partial pooling) ───
-    mixed_model = mixed_effects.MixedLMModel()
-    mixed_model.fit(df.loc[X_train.index], y_train)
-    mixed_train_metrics = _metrics(y_train, mixed_model.predict(df.loc[X_train.index]))
-    mixed_test_metrics = _metrics(y_test, mixed_model.predict(df.loc[X_test.index]))
-    _success("MixedLM (random intercept per municipality) fit on the spatial-block training split.")
-    comparison_rows.append(_row(
-        "MixedEffects", "spatial-block", mixed_train_metrics, mixed_test_metrics,
-        f"Formula: {mixed_effects.FORMULA}",
-    ))
-    candidates["MixedEffects"] = (mixed_model, mixed_test_metrics)
-
-    # ── Spatial-lag baseline (interpretable, in-sample only — see module docstring) ─
-    try:
-        gdf_full = geo_utils.to_gdf(df)
-        lag_model = spatial_baseline.fit_spatial_lag(X, y, gdf_full)
-        lag_summary = spatial_baseline.summarize(lag_model, kind="lag")
-        comparison_rows.append(_row(
-            "SpatialLag (GM_Lag)", "in-sample (full data)", None, None,
-            f"Pseudo R^2={lag_summary['pseudo_r2']:.4f} (in-sample; not comparable "
-            "to held-out Test R^2 above). Full coefficient table logged separately.",
-        ))
-        _success("Spatial-lag baseline fit: pseudo R^2=%.4f", lag_summary["pseudo_r2"])
-        with open(os.path.join(config.MODEL_DIR, "spatial_lag_summary.json"), "w", encoding="utf-8") as fh:
-            json.dump(lag_summary, fh, indent=2)
-    except Exception as exc:  # spreg is occasionally finicky about near-collinear features
-        log.warning("Spatial-lag baseline failed (%s) — continuing without it.", exc)
-        comparison_rows.append(_row("SpatialLag (GM_Lag)", "in-sample (full data)", None, None, f"Fit failed: {exc}"))
-
-    # ── Spatial-error baseline (interpretable, genuinely out-of-sample) ──────
-    try:
-        gdf_train = geo_utils.to_gdf(df.loc[X_train.index])
-        error_model = spatial_baseline.fit_spatial_error(X_train, y_train, gdf_train)
-        error_summary = spatial_baseline.summarize(error_model, kind="error")
-        error_test_pred = spatial_baseline.predict_out_of_sample(error_model, X_test)
-        error_test_metrics = _metrics(y_test, error_test_pred)
-        error_train_pred = spatial_baseline.predict_out_of_sample(error_model, X_train)
-        error_train_metrics = _metrics(y_train, error_train_pred)
-        comparison_rows.append(_row(
-            "SpatialError (GM_Error)", "spatial-block", error_train_metrics, error_test_metrics,
-            f"In-sample pseudo R^2={error_summary['pseudo_r2']:.4f}. Coefficient table logged separately.",
-        ))
-        candidates["SpatialError (GM_Error)"] = (error_model, error_test_metrics)
-        _success("Spatial-error baseline: held-out Test R^2=%.4f (in-sample pseudo R^2=%.4f)",
-                 error_test_metrics["r2"], error_summary["pseudo_r2"])
-        with open(os.path.join(config.MODEL_DIR, "spatial_error_summary.json"), "w", encoding="utf-8") as fh:
-            json.dump(error_summary, fh, indent=2)
-    except Exception as exc:
-        log.warning("Spatial-error baseline failed (%s) — continuing without it.", exc)
-        comparison_rows.append(_row("SpatialError (GM_Error)", "spatial-block", None, None, f"Fit failed: {exc}"))
-
-    # ── Pick the winner among all genuinely out-of-sample candidates ─────────
-    winner_name = max(candidates, key=lambda name: candidates[name][1]["r2"])
-    winner_model, winner_test_metrics = candidates[winner_name]
-    best_model_path = os.path.join(config.MODEL_DIR, "best_model.pkl")
-    joblib.dump(winner_model, best_model_path)
-    with open(BEST_MODEL_NAME_PATH, "w", encoding="utf-8") as fh:
-        fh.write(winner_name)
-    _success("Winner: %s (Test R^2=%.4f) among %s. Serialized to %s.",
-             winner_name, winner_test_metrics["r2"], list(candidates), best_model_path)
-
-    # ── Conformal prediction intervals around the winner (method swept) ──────
-    mapie_model, mapie_sweep = uncertainty.sweep_and_fit(
-        winner_model, X_train, y_train, block_ids_train, X_test, y_test
-    )
-    selected_method = mapie_sweep["selected"]
-    cov = mapie_sweep[selected_method]["coverage"]
-    joblib.dump(mapie_model, MAPIE_MODEL_PATH)
-    with open(os.path.join(config.MODEL_DIR, "mapie_sweep.json"), "w", encoding="utf-8") as fh:
-        json.dump(mapie_sweep, fh, indent=2)
-    _success(
-        "MAPIE conformal intervals fit around %s: method=%s selected from %s, "
-        "%.0f%% target coverage, %.1f%% observed on test set.",
-        winner_name, selected_method, list(uncertainty.SWEEP_METHODS),
-        uncertainty.CONFIDENCE_LEVEL * 100, cov * 100,
-    )
-
-    comparison_df = pd.DataFrame(comparison_rows)
-    comparison_df["winner"] = comparison_df["model"] == winner_name
-    comparison_df.to_csv(config.MODEL_COMPARISON_PATH, index=False)
-    _status("Model comparison table saved to %s.", config.MODEL_COMPARISON_PATH)
-
-    # ── Summary diagnostics ───────────────────────────────────────────────────
+    table = comparison.pivot(index="model", columns="split", values="r2")[list(SPLITS)]
+    table = table.reindex(list(CANDIDATES.values()))
     print()
-    print(comparison_df.to_string(index=False))
+    print("  R² by evaluation split")
+    print(table.round(3).to_string(na_rep="n/a"))
     print()
-    print(f"  Winner                       : {winner_name}")
-    print(f"  MAPIE method (swept)         : {selected_method}")
-    print(f"  MAPIE target/actual coverage : {uncertainty.CONFIDENCE_LEVEL:.0%} / {cov:.1%}")
-    print()
-    print(f"  GP residual Moran's I        : {gp_residual_diagnostics['morans_i']:.4f} "
-          f"(p={gp_residual_diagnostics['p_value']:.4f}) — compare against RF's last-measured 0.575")
-
-    return {
-        "rf_model": rf_model,
-        "xgb_model": xgb_model,
-        "gp_model": gp_model,
-        "mixed_model": mixed_model,
-        "winner_name": winner_name,
-        "winner_model": winner_model,
-        "comparison": comparison_df,
-        "gp_residual_diagnostics": gp_residual_diagnostics,
-    }
+    persistence = forecast_r2["persistence"]
+    verdict = "beats" if forecast_r2[best] > persistence else "does NOT beat"
+    print(f"  Forecast split: {CANDIDATES[best]} R²={forecast_r2[best]:.3f} {verdict} "
+          f"persistence R²={persistence:.3f}.")
+    return comparison
 
 
 if __name__ == "__main__":

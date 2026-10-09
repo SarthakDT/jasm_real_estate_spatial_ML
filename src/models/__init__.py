@@ -1,1 +1,1 @@
-"""Model implementations trained/compared on the same spatial train/test split: rf, gbm, spatial_baseline, uncertainty."""
+"""Models compared in src/train.py: naive baselines, Random Forest and XGBoost."""

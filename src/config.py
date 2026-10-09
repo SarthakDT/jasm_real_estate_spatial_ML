@@ -28,13 +28,18 @@ CHIKA_KOUJI_RAW_DIR = os.path.join(RAW_DIR, "chika_kouji")
 STAGE1_PATH = os.path.join(PROCESSED_DIR, "stage1.csv")
 STAGE2_PATH = os.path.join(PROCESSED_DIR, "stage2.csv")
 STAGE2_GEOPARQUET_PATH = os.path.join(PROCESSED_DIR, "stage2.geoparquet")
-ANOMALY_PATH = os.path.join(PROCESSED_DIR, "evaluation_anomalies.csv")
-SPATIAL_DIAGNOSTICS_PATH = os.path.join(DATA_DIR, "spatial_diagnostics.json")
-BACKTEST_PATH = os.path.join(DATA_DIR, "backtest_results.csv")
+ANOMALY_PATH = os.path.join(ANALYSIS_DIR, "forecast_anomalies.csv")
+SPATIAL_DIAGNOSTICS_PATH = os.path.join(ANALYSIS_DIR, "spatial_diagnostics.json")
+FORECAST_PREDICTIONS_PATH = os.path.join(ANALYSIS_DIR, "forecast_predictions.csv")
 
-MODEL_PATH = os.path.join(MODEL_DIR, "jasm_rf_model.pkl")
-CHART_PATH = os.path.join(MODEL_DIR, "feature_importance.png")
-MODEL_COMPARISON_PATH = os.path.join(MODEL_DIR, "model_comparison.csv")
+BEST_MODEL_PATH = os.path.join(MODEL_DIR, "best_model.pkl")
+FORECAST_MODEL_PATH = os.path.join(MODEL_DIR, "forecast_model.pkl")
+BEST_MODEL_NAME_PATH = os.path.join(MODEL_DIR, "best_model_name.txt")
+MODEL_COMPARISON_PATH = os.path.join(ANALYSIS_DIR, "model_comparison.csv")
+
+# Figures embedded in the README are committed, unlike other outputs.
+FIGURES_DIR = os.path.join(BASE_DIR, "docs", "figures")
+CHART_PATH = os.path.join(FIGURES_DIR, "feature_importance.png")
 
 # ── Coordinate reference systems ─────────────────────────────────────────────
 WGS84 = "EPSG:4326"
@@ -170,9 +175,10 @@ FEATURE_COLS = [
 ]
 TARGET_COL = "target_price_pct_change"
 
-RF_PARAMS = dict(n_estimators=100, max_depth=7, min_samples_split=5, random_state=42)
-TEST_SIZE = 0.25
+RF_PARAMS = dict(n_estimators=300, max_depth=7, min_samples_split=5, random_state=42, n_jobs=-1)
 RANDOM_STATE = 42
+# The forecast split trains on valuations up to this year and predicts the rest.
+FORECAST_TRAIN_MAX_YEAR = 2024
 ANOMALY_PCT = 0.95
 
 
