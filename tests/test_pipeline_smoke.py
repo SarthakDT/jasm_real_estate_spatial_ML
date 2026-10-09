@@ -28,7 +28,7 @@ def test_pipeline_end_to_end():
     stage2 = pd.read_csv(config.STAGE2_PATH, encoding="utf-8-sig")
     for col in config.FEATURE_COLS + [config.TARGET_COL]:
         assert col in stage2.columns
-    for col in ("flood_risk_class", "in_landslide_zone", "urban_planning_zone_type"):
+    for col in ("flood_risk_class", "in_landslide_zone", "prev_year_pct_change"):
         assert col in stage2.columns
     assert stage2.loc[stage2["municipality"] == "Kikuyo-cho"].shape[0] > 0, (
         "MUNI_NAMES regression: Kikuyo-cho (the JASM fab host municipality, code 43404) "

@@ -152,12 +152,21 @@ _VALID_MUNIS = set(MUNI_NAMES.values())
 
 # ── Model / training constants ────────────────────────────────────────────────
 FEATURE_COLS = [
+    "prev_year_pct_change",
+    "distance_to_jasm_km",
     "latitude",
     "longitude",
     "past_year_price",
     "valuation_year",
-    "distance_to_jasm_km",
-    "spatial_decay",
+    "lot_area_m2",
+    "station_distance_m",
+    "road_width_m",
+    "far",
+    "land_use_code",
+    "zoning_group",
+    "planning_area_code",
+    "flood_risk_class",
+    "in_landslide_zone",
 ]
 TARGET_COL = "target_price_pct_change"
 
