@@ -24,10 +24,15 @@ PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 ANALYSIS_DIR = os.path.join(DATA_DIR, "analysis")
 
 CHIKA_KOUJI_RAW_DIR = os.path.join(RAW_DIR, "chika_kouji")
+PREFECTURAL_SURVEY_RAW_DIR = os.path.join(RAW_DIR, "prefectural_survey")
 
+# L01 (January survey) keeps the original file names; L02 (July survey) gets its own.
 STAGE1_PATH = os.path.join(PROCESSED_DIR, "stage1.csv")
 STAGE2_PATH = os.path.join(PROCESSED_DIR, "stage2.csv")
 STAGE2_GEOPARQUET_PATH = os.path.join(PROCESSED_DIR, "stage2.geoparquet")
+STAGE1_L02_PATH = os.path.join(PROCESSED_DIR, "stage1_l02.csv")
+STAGE2_L02_PATH = os.path.join(PROCESSED_DIR, "stage2_l02.csv")
+COMMON_SITES_PATH = os.path.join(PROCESSED_DIR, "common_sites.csv")
 ANOMALY_PATH = os.path.join(ANALYSIS_DIR, "forecast_anomalies.csv")
 SPATIAL_DIAGNOSTICS_PATH = os.path.join(ANALYSIS_DIR, "spatial_diagnostics.json")
 FORECAST_PREDICTIONS_PATH = os.path.join(ANALYSIS_DIR, "forecast_predictions.csv")
@@ -51,10 +56,14 @@ PROJECTED_CRS = "EPSG:6670"
 # are valuations as of January 1, so the 2021 values predate the announcement
 # and 2022 is the first valuation that could reflect it.
 ANNOUNCEMENT_DATE = "2021-10"
-FIRST_POST_VALUATION_YEAR = 2022
-YEARS = list(range(2019, 2027))
-LAT_MIN, LAT_MAX = 32.0, 33.2
-LON_MIN, LON_MAX = 130.0, 131.2
+FIRST_POST_VALUATION_YEAR = 2022   # holds for both surveys: L02's July 2021 valuation is also pre-announcement
+YEARS = list(range(2019, 2027))    # L01 (Chika-Kouji, valued January 1)
+L02_YEARS = list(range(2015, 2027))  # L02 (prefectural survey, valued July 1); MLIT publishes no 2014 file
+# Kumamoto Prefecture's extent from MLIT's N03 boundaries (129.94-131.33 E,
+# 32.10-33.20 N), rounded outward. The prefectural survey reaches the
+# western Amakusa islands and the eastern Aso villages.
+LAT_MIN, LAT_MAX = 32.0, 33.25
+LON_MIN, LON_MAX = 129.9, 131.4
 
 # WGS84 centroid of the JASM (TSMC/Sony/Denso JV) semiconductor fab site,
 # Kikuyo-cho, Kumamoto.
@@ -94,6 +103,54 @@ _SCHEMA: dict[tuple, dict] = {
     },
 }
 
+# MLIT L02 (prefectural land price survey, 都道府県地価調査) property keys per
+# era. 2015-2016 come as shapefiles without zoning or planning-area fields; the
+# change rate appears in 2021; the 2026 release shifts the later columns by
+# one. Positions were found by pairing 120 records per year between the GML
+# (which names each field) and the GeoJSON/shapefile, then checked against
+# value ranges in all twelve years.
+_L02_COMMON = {
+    "use_code": "L02_001", "serial": "L02_002",
+    "prev_use_code": "L02_003", "prev_serial": "L02_004",
+    "year": "L02_005", "price": "L02_006",
+}
+_L02_SCHEMA: dict[tuple, dict] = {
+    (2015, 2016): {
+        **_L02_COMMON, "site_status": "L02_007", "muni_code": "L02_017",
+        "lot_area_m2": "L02_020", "current_use": "L02_021", "road_width_m": "L02_034",
+        "station_name": "L02_039", "station_distance_m": "L02_040",
+        "bcr": "L02_042", "far": "L02_043", "common_point": "L02_044",
+    },
+    (2017, 2020): {
+        **_L02_COMMON, "site_status": "L02_007", "muni_code": "L02_021",
+        "lot_area_m2": "L02_024", "current_use": "L02_025", "road_width_m": "L02_038",
+        "station_name": "L02_043", "station_distance_m": "L02_044", "zoning": "L02_045",
+        "planning_area": "L02_047", "bcr": "L02_050", "far": "L02_051", "common_point": "L02_052",
+    },
+    (2021, 2025): {
+        **_L02_COMMON, "published_change_pct": "L02_007", "site_status": "L02_008",
+        "muni_code": "L02_020", "lot_area_m2": "L02_024", "current_use": "L02_025",
+        "road_width_m": "L02_039", "station_name": "L02_044", "station_distance_m": "L02_045",
+        "zoning": "L02_046", "planning_area": "L02_048", "bcr": "L02_050", "far": "L02_051",
+        "common_point": "L02_053",
+    },
+    (2026, 2026): {
+        **_L02_COMMON, "published_change_pct": "L02_007", "site_status": "L02_008",
+        "muni_code": "L02_020", "lot_area_m2": "L02_024", "current_use": "L02_025",
+        "road_width_m": "L02_039", "station_name": "L02_045", "station_distance_m": "L02_046",
+        "zoning": "L02_047", "planning_area": "L02_049", "bcr": "L02_051", "far": "L02_052",
+        "common_point": "L02_054",
+    },
+}
+# Forest plots (林地): numbered prefecture-wide under code 43900 with land-use
+# code 020. L01 has none, and they are not land the fab would plausibly move,
+# so they are dropped at load.
+L02_EXCLUDED_USE_CODES = ("020",)
+
+# An L02 site within this distance of an L01 site in the same year is the
+# same physical plot valued by both surveys (a "common point", 共通地点).
+COMMON_SITE_MAX_DISTANCE_M = 5.0
+
 # Each record also carries the plot's price history: a "selected year" flag
 # string (one character per year from 1983, "1" = the site was a benchmark that
 # year) followed by one price column per year from 1983. Values are
@@ -115,7 +172,7 @@ LAND_USE_CODES = {
 
 # 都市計画区域区分: urbanization promotion area, urbanization control area,
 # and planning areas with no such split.
-PLANNING_AREAS = {"市街化": "urbanization", "調区": "control", "非線引": "undivided"}
+PLANNING_AREAS = {"市街化": "urbanization", "調区": "control", "非線引": "undivided", "都計外": "outside"}
 
 # JIS X 0402 municipality codes present in Kumamoto prefecture (43) dataset.
 #
@@ -152,6 +209,33 @@ MUNI_NAMES: dict[str, str] = {
     "43442": "Kashima-machi",
     "43443": "Mashiki-machi",
     "43482": "Ashikita-machi",
+    # Added for the L02 survey, which covers every municipality. Japanese
+    # names from MLIT's N03 administrative boundaries (2023-01-01).
+    "43212": "Kamiamakusa-shi",
+    "43348": "Misato-machi",
+    "43364": "Gyokuto-machi",
+    "43367": "Nankan-machi",
+    "43369": "Nagomi-machi",
+    "43423": "Minamioguni-machi",
+    "43424": "Oguni-machi",
+    "43425": "Ubuyama-mura",
+    "43428": "Takamori-machi",
+    "43432": "Nishihara-mura",
+    "43433": "Minamiaso-mura",
+    "43444": "Kosa-machi",
+    "43447": "Yamato-cho",
+    "43468": "Hikawa-cho",
+    "43484": "Tsunagi-machi",
+    "43501": "Nishiki-machi",
+    "43505": "Taragi-machi",
+    "43506": "Yunomae-machi",
+    "43507": "Mizukami-mura",
+    "43510": "Sagara-mura",
+    "43511": "Itsuki-mura",
+    "43512": "Yamae-mura",
+    "43513": "Kuma-mura",
+    "43514": "Asagiri-cho",
+    "43531": "Reihoku-machi",
 }
 _VALID_MUNIS = set(MUNI_NAMES.values())
 
