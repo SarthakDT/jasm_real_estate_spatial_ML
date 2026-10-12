@@ -21,6 +21,10 @@ def test_pipeline_end_to_end():
     assert len(stage1) > 0
     assert stage1["valuation_year"].min() == config.YEARS[0] + 1
     assert stage1["point_id"].is_unique
+    stage1_l02 = pd.read_csv(config.STAGE1_L02_PATH, encoding="utf-8-sig")
+    assert stage1_l02["point_id"].is_unique
+    assert stage1_l02["plot_id"].str.startswith("L02:").all()
+    assert (stage1_l02["site_id"] != stage1_l02["plot_id"]).any(), "expected sites shared with L01"
 
     features.run()
     stage2 = pd.read_csv(config.STAGE2_PATH, encoding="utf-8-sig")
@@ -53,6 +57,7 @@ def test_pipeline_end_to_end():
     main = results["main"]
     assert main["ci_low"] <= main["estimate_pp"] <= main["ci_high"]
     assert main["n_near_plots"] > 0
+    assert {r["survey"] for r in results["by_survey"]} == {"L01", "L02"}
     years = [row["year"] for row in results["event_study"]]
     assert fab_impact.REFERENCE_YEAR in years
     for path in (fab_impact.BANDS_FIGURE, fab_impact.EVENT_STUDY_FIGURE, fab_impact.MAP_FIGURE):

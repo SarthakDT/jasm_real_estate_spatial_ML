@@ -149,7 +149,10 @@ L02_EXCLUDED_USE_CODES = ("020",)
 
 # An L02 site within this distance of an L01 site in the same year is the
 # same physical plot valued by both surveys (a "common point", 共通地点).
-COMMON_SITE_MAX_DISTANCE_M = 5.0
+# The two surveys' coordinates for MLIT-flagged common points agree to 0.01 m
+# in 2019 but drift up to ~7 m apart from 2020 as each revises its geocoding;
+# unrelated benchmark plots are far further apart than this.
+COMMON_SITE_MAX_DISTANCE_M = 10.0
 
 # Each record also carries the plot's price history: a "selected year" flag
 # string (one character per year from 1983, "1" = the site was a benchmark that
