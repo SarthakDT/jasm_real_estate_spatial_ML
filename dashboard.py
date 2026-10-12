@@ -20,9 +20,9 @@ st.set_page_config(page_title="TSMC fab and Kumamoto land prices", page_icon=":m
 
 REQUIRED = [fab_impact.PANEL_PATH, fab_impact.DISTANCE_BANDS_PATH, fab_impact.DID_RESULTS_PATH, fab_impact.CUMULATIVE_PATH,
             config.MODEL_COMPARISON_PATH, config.FORECAST_PREDICTIONS_PATH]
-FIRST, LAST = fab_impact.HISTORY_RELEASE_YEAR, config.YEARS[-1]
+FIRST, LAST = fab_impact.HISTORY_RELEASE_YEAR, max(config.YEARS[-1], config.L02_YEARS[-1])
 ANNOUNCE_X = config.FIRST_POST_VALUATION_YEAR - 0.5
-QUAKE_X = fab_impact.EARTHQUAKE_FIRST_VALUATION - 0.5
+SURVEYS = {"L01": "January survey (Chika-Kouji)", "L02": "July survey (prefectural)"}
 
 
 @st.cache_data
@@ -38,8 +38,10 @@ def load_outputs():
     return panel, bands, did, comparison, forecast, best_name, cum
 
 
-def event_rules(top: float) -> alt.Chart:
-    events = pd.DataFrame({"x": [QUAKE_X, ANNOUNCE_X], "label": ["Kumamoto earthquakes", "Fab announced"], "y": [top, top]})
+def event_rules(top: float, survey: str = "L01") -> alt.Chart:
+    """Earthquake and announcement markers. The July survey's 2016 valuation already followed the earthquakes."""
+    quake_x = fab_impact.EARTHQUAKE_FIRST_VALUATION[survey] - 0.5
+    events = pd.DataFrame({"x": [quake_x, ANNOUNCE_X], "label": ["Kumamoto earthquakes", "Fab announced"], "y": [top, top]})
     rules = alt.Chart(events).mark_rule(strokeDash=[4, 4], color=plot_style.TEXT_SECONDARY).encode(x="x:Q")
     text = alt.Chart(events).mark_text(align="left", dx=4, dy=8, fontSize=11, color=plot_style.TEXT_SECONDARY).encode(
         x="x:Q", y=alt.Y("y:Q"), text="label:N")
@@ -56,24 +58,30 @@ if not all(os.path.isfile(p) for p in REQUIRED):
 
 panel, bands, did, comparison, forecast, best_name, cum = load_outputs()
 main = did["main"]
+by_survey = {r["survey"]: r for r in did["by_survey"]}
 radius = did["treatment_radius_km"]
-near = cum["distance_to_jasm_km"] <= radius
 r2 = comparison.pivot(index="model_key", columns="split", values="r2")
+latest_l02 = bands[(bands["survey"] == "L02") & (bands["band"] == fab_impact.BANDS[0][2])].set_index("year")["mean_pct_change"]
+latest_year = int(latest_l02.index.max())
 
 st.title("Did TSMC's Kumamoto fab move land prices?")
 st.caption(
-    "MLIT Chika-Kouji benchmark land prices for Kumamoto Prefecture, 2013–2026. "
-    "TSMC announced the JASM fab in Kikuyo in October 2021; the 2022 valuation is the first after it."
+    "MLIT benchmark land prices for Kumamoto Prefecture from two official surveys: Chika-Kouji (valued January 1) "
+    "and the prefectural survey (valued July 1). TSMC announced the JASM fab in Kikuyo in October 2021; "
+    "the 2022 valuation is the first after it in both."
 )
 
 with st.container(horizontal=True):
     st.metric(f"Extra annual growth within {radius} km", f"{main['estimate_pp']:+.1f} pp",
               f"95% CI {main['ci_low']:+.1f} to {main['ci_high']:+.1f}", delta_color="off", border=True,
-              help="Difference-in-differences with plot and year fixed effects, standard errors clustered by plot.")
-    st.metric(f"Median price change {FIRST}–{LAST}, within {radius} km", f"{cum.loc[near, 'cum_change'].median():.0f}%",
-              f"{near.sum()} plots", delta_color="off", border=True)
-    st.metric(f"Median price change {FIRST}–{LAST}, farther away", f"{cum.loc[~near, 'cum_change'].median():.0f}%",
-              f"{(~near).sum()} plots", delta_color="off", border=True)
+              help="Difference-in-differences on both surveys: plot and survey-by-year fixed effects, "
+                   "standard errors clustered by site.")
+    st.metric("Same estimate, January / July survey alone",
+              f"{by_survey['L01']['estimate_pp']:+.1f} / {by_survey['L02']['estimate_pp']:+.1f} pp",
+              "two independent surveys", delta_color="off", border=True)
+    st.metric(f"Latest reading: July {latest_year}, within 5 km", f"{latest_l02[latest_year]:+.1f}%",
+              f"July {latest_year - 1}: {latest_l02[latest_year - 1]:+.1f}%", delta_color="off", border=True,
+              help="Mean annual change of July-survey plots within 5 km of the fab.")
     st.metric(f"Forecast R², {best_name} vs persistence",
               f"{r2.loc['xgboost' if best_name == 'XGBoost' else 'random_forest', 'forecast']:.2f}",
               f"persistence {r2.loc['persistence', 'forecast']:.2f}", delta_color="off", border=True)
@@ -86,10 +94,18 @@ tab_impact, tab_models, tab_errors, tab_data = st.tabs(
 # ── Fab impact ────────────────────────────────────────────────────────────────
 with tab_impact:
     band_order = [b[2] for b in fab_impact.BANDS]
+    survey = st.segmented_control("Survey", list(SURVEYS), default="L02", format_func=lambda s: SURVEYS[s],
+                                  key="survey") or "L02"
+    survey_bands = bands[bands["survey"] == survey]
+    survey_cum = cum[cum["survey"] == survey]
+    near = survey_cum["distance_to_jasm_km"] <= radius
     with st.container(border=True):
-        st.subheader("Mean annual price change by distance from the fab")
-        top = float(bands["mean_pct_change"].max())
-        lines = alt.Chart(bands).mark_line(point=True, strokeWidth=2).encode(
+        st.subheader(f"Mean annual price change by distance from the fab, {SURVEYS[survey].lower()}")
+        st.caption(f"Median change {FIRST}–{LAST}: {survey_cum.loc[near, 'cum_change'].median():+.0f}% for "
+                   f"{near.sum()} plots within {radius} km, {survey_cum.loc[~near, 'cum_change'].median():+.0f}% "
+                   f"for {(~near).sum()} plots farther away.")
+        top = float(survey_bands["mean_pct_change"].max())
+        lines = alt.Chart(survey_bands).mark_line(point=True, strokeWidth=2).encode(
             x=year_axis(),
             y=alt.Y("mean_pct_change:Q", title="Mean annual change (%)"),
             color=alt.Color("band:N", title="Distance from fab", sort=band_order,
@@ -99,19 +115,19 @@ with tab_impact:
                      alt.Tooltip("n_plots:Q", title="Plots")],
         )
         zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color=plot_style.TEXT_SECONDARY).encode(y="y:Q")
-        st.altair_chart(zero + lines + event_rules(top), width="stretch")
+        st.altair_chart(zero + lines + event_rules(top, survey), width="stretch")
 
     with st.container(border=True):
         st.subheader(f"Event study: plots within {radius} km vs the rest")
         st.caption(f"Extra annual price change relative to {fab_impact.REFERENCE_YEAR}, with 95% confidence intervals. "
-                   "Including Kumamoto City, near plots lagged in 2017–2020 while the city boomed after the "
-                   "earthquakes; outside the city the pre-announcement years are flat apart from 2017.")
-        es = pd.concat([
-            pd.DataFrame(did["event_study"]).assign(sample="All plots"),
-            pd.DataFrame(did["event_study_excluding_kumamoto_city"]).assign(sample="Excluding Kumamoto City"),
-        ])
-        es["year_shift"] = es["year"] + es["sample"].map({"All plots": -0.12, "Excluding Kumamoto City": 0.12})
-        color = alt.Color("sample:N", title=None, scale=alt.Scale(range=plot_style.CATEGORICAL[:2]))
+                   "Before the 2016 earthquakes near and far plots moved together; near plots then ran about "
+                   "1 pp a year behind until 2021, and pulled ahead from 2022.")
+        samples = {"Both surveys": ("event_study", -0.2), "July survey (L02) only": ("event_study_l02", 0.0),
+                   "Both, excluding Kumamoto City": ("event_study_excluding_kumamoto_city", 0.2)}
+        es = pd.concat([pd.DataFrame(did[key]).assign(sample=name) for name, (key, _) in samples.items()])
+        es["year_shift"] = es["year"] + es["sample"].map({name: dx for name, (_, dx) in samples.items()})
+        color = alt.Color("sample:N", title=None, sort=list(samples),
+                          scale=alt.Scale(domain=list(samples), range=plot_style.CATEGORICAL[:3]))
         base = alt.Chart(es).encode(x=alt.X("year_shift:Q", title=None, axis=alt.Axis(format="d", tickMinStep=1)),
                                     color=color)
         bars = base.mark_rule(strokeWidth=2).encode(y=alt.Y("ci_low:Q", title="Extra annual change (pp)"), y2="ci_high:Q")
@@ -127,9 +143,9 @@ with tab_impact:
     col_map, col_table = st.columns([3, 2])
     with col_map:
         with st.container(border=True):
-            st.subheader(f"Price change {FIRST}–{LAST}")
+            st.subheader(f"Price change {FIRST}–{LAST}, {SURVEYS[survey].lower()}")
             fig = px.scatter_map(
-                cum, lat="latitude", lon="longitude", color="cum_change", hover_name="municipality",
+                survey_cum, lat="latitude", lon="longitude", color="cum_change", hover_name="municipality",
                 hover_data={"cum_change": ":.1f", "distance_to_jasm_km": ":.1f", "latitude": False, "longitude": False},
                 labels={"cum_change": "Change (%)", "distance_to_jasm_km": "Distance to fab (km)"},
                 color_continuous_scale=[plot_style.NEGATIVE, plot_style.NEUTRAL, plot_style.SERIES, plot_style.DISTANCE_RAMP[0]],
@@ -144,7 +160,7 @@ with tab_impact:
         with st.container(border=True):
             st.subheader("Difference-in-differences")
             st.caption("Average extra annual % change near the fab after 2021.")
-            did_table = pd.DataFrame([main] + did["robustness"])[
+            did_table = pd.DataFrame([main] + did["by_survey"] + did["robustness"])[
                 ["label", "estimate_pp", "ci_low", "ci_high", "p_value", "n_near_plots"]]
             st.dataframe(
                 did_table, hide_index=True, width="stretch",

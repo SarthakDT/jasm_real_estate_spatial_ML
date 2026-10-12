@@ -22,4 +22,6 @@ statsmodels==0.14.6
 
 # Dev / testing
 pytest==9.1.1
-ipykernel==7.4.0    # to re-run notebooks/findings.ipynb
+ipykernel==7.4.0    # notebooks/build_findings.py
+nbformat==5.11.1
+nbclient==0.11.0
