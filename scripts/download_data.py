@@ -5,7 +5,9 @@ All files come from MLIT's National Land Numerical Information service
 (国土数値情報, https://nlftp.mlit.go.jp/ksj/) and are published under the
 Japan Public Data License 1.0, which permits reuse with attribution.
 
-  L01  Chika-Kouji benchmark land prices (地価公示), Kumamoto, 2019-2026
+  L01  Chika-Kouji benchmark land prices (地価公示, valued January 1), Kumamoto, 2019-2026
+  L02  Prefectural land price survey (都道府県地価調査, valued July 1), Kumamoto,
+       2015-2026 (MLIT publishes no 2014 file; 2015-2017 are shapefile-only)
   A31  Flood inundation risk zones (洪水浸水想定区域), FY2012
   A33  Landslide hazard warning zones (土砂災害警戒区域), FY2018
   N03  Administrative boundaries (行政区域), 2023-01-01
@@ -39,6 +41,11 @@ DATASETS = [
     *(
         (f"L01/L01-{yy}/L01-{yy}_43_GML.zip", f"chika_kouji/L01-{yy}_43_GML", _GEOJSON)
         for yy in range(19, 27)
+    ),
+    *(
+        (f"L02/L02-{yy}/L02-{yy}_43_GML.zip", f"prefectural_survey/L02-{yy}_43_GML",
+         _SHAPEFILE if yy < 18 else _GEOJSON)
+        for yy in range(15, 27)
     ),
     ("A31/A31-12/A31-12_43_GML.zip", "hazards/A31_43_GML", _SHAPEFILE),
     ("A33/A33-18/A33-18_43_GML.zip", "hazards/A33_43_GML", _SHAPEFILE),
