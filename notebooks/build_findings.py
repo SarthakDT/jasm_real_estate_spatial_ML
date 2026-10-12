@@ -20,12 +20,14 @@ OUT = os.path.join(HERE, "findings.ipynb")
 cells = []
 
 
+# Fixed cell ids and no timing metadata, so a rebuild only changes the file
+# when its content changes.
 def md(text: str) -> None:
-    cells.append(nbf.v4.new_markdown_cell(text.strip()))
+    cells.append(nbf.v4.new_markdown_cell(text.strip(), id=f"cell-{len(cells):02d}"))
 
 
 def code(text: str) -> None:
-    cells.append(nbf.v4.new_code_cell(text.strip()))
+    cells.append(nbf.v4.new_code_cell(text.strip(), id=f"cell-{len(cells):02d}"))
 
 
 md("""
@@ -119,7 +121,7 @@ code("""
 rows = [did["main"]] + did["by_survey"] + did["robustness"]
 table = pd.DataFrame(rows)[["label", "estimate_pp", "ci_low", "ci_high", "n_near_sites"]]
 (table.set_index("label").rename_axis("Within 10 km unless stated")
-      .style.format({"estimate_pp": "{:+.1f} pp", "ci_low": "{:+.1f}", "ci_high": "{:+.1f}", "n_near_sites": "{:d}"})
+      .style.set_uuid("table1").format({"estimate_pp": "{:+.1f} pp", "ci_low": "{:+.1f}", "ci_high": "{:+.1f}", "n_near_sites": "{:d}"})
       .relabel_index(["Extra growth per year", "95% range from", "to", "Sites near the fab"], axis=1))
 """)
 
@@ -180,7 +182,7 @@ yen = res.groupby("ring", observed=True).agg(
 )
 yen["lot_250"] = yen["yen_per_m2"] * 250
 (yen.rename_axis("Distance from fab")
-    .style.format({"price_2021": "¥{:,.0f}", "price_2026": "¥{:,.0f}", "change_pct": "{:+.0f}%",
+    .style.set_uuid("table2").format({"price_2021": "¥{:,.0f}", "price_2026": "¥{:,.0f}", "change_pct": "{:+.0f}%",
                    "yen_per_m2": lambda v: f"{'+' if v >= 0 else '−'}¥{abs(v):,.0f}",
                    "lot_250": lambda v: f"{'+' if v >= 0 else '−'}¥{abs(v) / 1e6:.1f}M"})
     .relabel_index(["Sites", "Median ¥/m² 2021", "Median ¥/m² 2026", "Median change",
@@ -202,7 +204,7 @@ recent = bands[bands["year"] >= 2023].pivot_table(index="band", columns=["survey
 recent = recent.reindex(RING_LABELS)
 recent.columns = [f"{'Jan' if s == 'L01' else 'Jul'} {y}" for s, y in recent.columns]
 recent = recent[sorted(recent.columns, key=lambda c: (int(c[-4:]), c.startswith("Jul")))]
-recent.rename_axis("Distance from fab").style.format("{:+.1f}%")
+recent.rename_axis("Distance from fab").style.set_uuid("table3").format("{:+.1f}%")
 """)
 md("""
 Whether this is a plateau, a pause before the planned second fab, or the start of a correction cannot be read from appraisals alone (see the plan in section 8).
@@ -220,7 +222,7 @@ flood = latest.groupby("ring", observed=True).agg(sites=("flood_risk_class", "si
                                                   in_flood_zone=("flood_risk_class", lambda s: (s > 0).sum()))
 flood["share"] = flood["in_flood_zone"] / flood["sites"]
 (flood.rename_axis("Distance from fab")
-      .style.format({"share": "{:.0%}"})
+      .style.set_uuid("table4").format({"share": "{:.0%}"})
       .relabel_index(["Sites", "In a mapped flood zone", "Share"], axis=1))
 """)
 md("""
@@ -242,7 +244,7 @@ rows = ["Persistence (last year's change)", "Random Forest", "XGBoost"]
 sub = comparison[comparison["split"].isin(pick)].assign(test=lambda d: d["split"].map(pick))
 mae = sub.pivot(index="model", columns="test", values="mae").loc[rows, list(pick.values())]
 mae.index = ["Rule: same as last year", "Random Forest", "XGBoost"]
-mae.rename_axis("Average miss (pp)").style.format("{:.2f}").highlight_min(axis=0, props="font-weight: bold")
+mae.rename_axis("Average miss (pp)").style.set_uuid("table5").format("{:.2f}").highlight_min(axis=0, props="font-weight: bold")
 """)
 md("""
 **Practical meaning:** do not use this project's models to forecast next year's land prices. Last year's change is as good a guide as anything here, and it misses turning points. Better forecasts need leading indicators such as transaction volumes, building permits and population inflows, not a more complex model on the same data.
@@ -302,7 +304,13 @@ def main() -> None:
         "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
         "language_info": {"name": "python"},
     }
-    NotebookClient(nb, timeout=600, kernel_name="python3", resources={"metadata": {"path": HERE}}).execute()
+    NotebookClient(nb, timeout=600, kernel_name="python3", record_timing=False,
+                   resources={"metadata": {"path": HERE}}).execute()
+    # Styled tables also carry a text fallback containing a memory address.
+    for cell in nb.cells:
+        for output in cell.get("outputs", []):
+            if "text/html" in output.get("data", {}):
+                output["data"].pop("text/plain", None)
     nbf.write(nb, OUT)
     print("wrote", OUT)
 
