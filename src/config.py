@@ -9,17 +9,12 @@ own copy.
 
 import os
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 # ── Paths ──────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 
 RAW_DIR = os.path.join(DATA_DIR, "raw")
-INTERIM_DIR = os.path.join(DATA_DIR, "interim")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 ANALYSIS_DIR = os.path.join(DATA_DIR, "analysis")
 
@@ -33,7 +28,6 @@ STAGE2_GEOPARQUET_PATH = os.path.join(PROCESSED_DIR, "stage2.geoparquet")
 STAGE1_L02_PATH = os.path.join(PROCESSED_DIR, "stage1_l02.csv")
 STAGE2_L02_PATH = os.path.join(PROCESSED_DIR, "stage2_l02.csv")
 COMMON_SITES_PATH = os.path.join(PROCESSED_DIR, "common_sites.csv")
-ANOMALY_PATH = os.path.join(ANALYSIS_DIR, "forecast_anomalies.csv")
 SPATIAL_DIAGNOSTICS_PATH = os.path.join(ANALYSIS_DIR, "spatial_diagnostics.json")
 FORECAST_PREDICTIONS_PATH = os.path.join(ANALYSIS_DIR, "forecast_predictions.csv")
 
@@ -52,10 +46,9 @@ WGS84 = "EPSG:4326"
 PROJECTED_CRS = "EPSG:6670"
 
 # ── Kumamoto / JASM domain constants ─────────────────────────────────────────
-# TSMC confirmed its Kumamoto fab plan in October 2021. MLIT benchmark prices
-# are valuations as of January 1, so the 2021 values predate the announcement
-# and 2022 is the first valuation that could reflect it.
-ANNOUNCEMENT_DATE = "2021-10"
+# TSMC confirmed its Kumamoto fab plan in October 2021. Both surveys value
+# land on a fixed date (January 1 or July 1), so 2021 valuations predate the
+# announcement and 2022 is the first that could reflect it.
 FIRST_POST_VALUATION_YEAR = 2022   # holds for both surveys: L02's July 2021 valuation is also pre-announcement
 YEARS = list(range(2019, 2027))    # L01 (Chika-Kouji, valued January 1)
 L02_YEARS = list(range(2015, 2027))  # L02 (prefectural survey, valued July 1); MLIT publishes no 2014 file
@@ -266,26 +259,3 @@ RF_PARAMS = dict(n_estimators=300, max_depth=7, min_samples_split=5, random_stat
 RANDOM_STATE = 42
 # The forecast split trains on valuations up to this year and predicts the rest.
 FORECAST_TRAIN_MAX_YEAR = 2024
-ANOMALY_PCT = 0.95
-
-
-# ── API credentials ────────────────────────────────────────────────────────
-def get_reinfolib_key() -> str:
-    key = os.environ.get("REINFOLIB_API_KEY")
-    if not key:
-        raise RuntimeError(
-            "REINFOLIB_API_KEY is not set. Register for a free key at "
-            "https://www.reinfolib.mlit.go.jp/api/request and add it to .env "
-            "(copy .env.example)."
-        )
-    return key
-
-
-def get_estat_app_id() -> str:
-    app_id = os.environ.get("ESTAT_APP_ID")
-    if not app_id:
-        raise RuntimeError(
-            "ESTAT_APP_ID is not set. Register for a free application ID at "
-            "https://www.e-stat.go.jp/api/ and add it to .env (copy .env.example)."
-        )
-    return app_id

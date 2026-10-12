@@ -45,7 +45,6 @@ def test_pipeline_end_to_end():
     assert set(preds["valuation_year"]) == {y for y in config.YEARS if y > config.FORECAST_TRAIN_MAX_YEAR}
 
     evaluate.run()
-    assert os.path.isfile(config.ANOMALY_PATH)
     assert os.path.isfile(config.CHART_PATH)
     diagnostics = json.load(open(config.SPATIAL_DIAGNOSTICS_PATH, encoding="utf-8"))
     # Observed changes must be spatially autocorrelated: that is why the

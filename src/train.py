@@ -36,17 +36,15 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import GroupKFold, KFold
 
 from src import config
-from src.logging_utils import get_logger, status
-from src.models import baselines, gbm, rf
+from src.logging_utils import get_logger
+from src.models import baselines, gbm
 from src.spatial_cv import N_BLOCKS, SpatialBlockKFold, assign_spatial_blocks
 
 log = get_logger(__name__)
-
-
-def _status(msg, *args): status(log, msg, *args)
 
 
 N_FOLDS = 5
@@ -83,16 +81,12 @@ class FeatureModel:
         if self.kind == "xgboost":
             self.estimator_, self.params_ = gbm.build_and_tune(X, y, groups=df["plot_id"])
         else:
-            self.estimator_ = rf.build_model().fit(X, y)
+            self.estimator_ = RandomForestRegressor(**config.RF_PARAMS).fit(X, y)
             self.params_ = config.RF_PARAMS
         return self
 
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         return self.estimator_.predict(df[config.FEATURE_COLS])
-
-    @property
-    def feature_importances_(self):
-        return self.estimator_.feature_importances_
 
 
 def _make_candidate(key: str):
@@ -201,7 +195,7 @@ def run() -> pd.DataFrame:
     comparison = pd.DataFrame(rows)
     os.makedirs(config.ANALYSIS_DIR, exist_ok=True)
     comparison.to_csv(config.MODEL_COMPARISON_PATH, index=False)
-    _status("Wrote %s.", config.MODEL_COMPARISON_PATH)
+    log.info("Wrote %s.", config.MODEL_COMPARISON_PATH)
 
     # Pick the better ML model on the forecast split and save it.
     forecast_r2 = comparison[comparison["split"] == "forecast"].set_index("model_key")["r2"]
@@ -223,7 +217,7 @@ def run() -> pd.DataFrame:
     test["predicted"] = test[f"pred_{best}"]
     test["residual"] = test["actual"] - test["predicted"]
     test.to_csv(config.FORECAST_PREDICTIONS_PATH, index=False, encoding="utf-8-sig")
-    _status("Saved %s (best on forecast split) and its forecast-split predictions.", CANDIDATES[best])
+    log.info("Saved %s (best on forecast split) and its forecast-split predictions.", CANDIDATES[best])
 
     table = comparison.pivot(index="model", columns="split", values="r2")[list(SPLITS)]
     table = table.reindex(list(CANDIDATES.values()))

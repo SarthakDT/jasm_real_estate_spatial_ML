@@ -125,5 +125,5 @@ python notebooks/build_findings.py  # rebuild the stakeholder notebook
 | 1. Load | `src/load_data.py`, `src/data_sources/` | one row per plot and year for each survey, linked by MLIT plot number; common sites paired |
 | 2. Features | `src/features.py` | annual % change, last year's change, distance to the fab, MLIT plot attributes, hazard flags |
 | 3. Models | `src/train.py` | `data/analysis/model_comparison.csv`, including the external July-survey tests |
-| 4. Forecast errors | `src/evaluate.py` | worst forecasts, permutation importance, residual Moran's I |
+| 4. Forecast errors | `src/evaluate.py` | errors by municipality and year, permutation importance, residual Moran's I |
 | 5. Fab impact | `src/fab_impact.py` | distance bands, difference-in-differences, event studies, figures |

@@ -1,7 +1,6 @@
 """
 National Land Numerical Information (国土数値情報) hazard & land-use layers
-for Kumamoto Prefecture — manually downloaded (no API), same pattern as the
-Chika-Kouji GML folders.
+for Kumamoto Prefecture, fetched by scripts/download_data.py.
 
 Layers used:
   A31  Flood inundation risk zones (洪水浸水想定区域), FY2012 vintage
@@ -11,15 +10,11 @@ Layers used:
 Source: https://nlftp.mlit.go.jp/ksj/ (Japan Public Data License 1.0)
 """
 
-import glob
 import os
 
 import geopandas as gpd
 
 from src import config, geo_utils
-from src.logging_utils import get_logger
-
-log = get_logger(__name__)
 
 HAZARD_DIR = os.path.join(config.RAW_DIR, "hazards")
 A31_SHP = os.path.join(HAZARD_DIR, "A31_43_GML", "A31-12_43.shp")
@@ -32,7 +27,7 @@ _FLOOD_RANK_MAP = {11: 1, 12: 2, 13: 3, 14: 4, 15: 5}
 
 
 def _require(path: str) -> str:
-    if not os.path.isfile(path) and not glob.glob(path):
+    if not os.path.isfile(path):
         raise FileNotFoundError(
             f"Hazard data missing: {path}\n"
             "Run `python scripts/download_data.py` to fetch the NLNI archives."
@@ -87,11 +82,3 @@ def join_hazards_to_points(points_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     result["in_landslide_zone"] = pts["in_landslide_zone"]
     return result.set_crs(original_crs, allow_override=True)
 
-
-if __name__ == "__main__":
-    admin = load_admin_boundaries()
-    log.info("Loaded %d admin boundary polygons.", len(admin))
-    flood = _load_flood_zones()
-    log.info("Loaded %d flood risk polygons.", len(flood))
-    landslide = _load_landslide_zones()
-    log.info("Loaded %d landslide hazard polygons.", len(landslide))

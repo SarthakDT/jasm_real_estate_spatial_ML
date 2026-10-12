@@ -21,7 +21,6 @@ import geopandas as gpd
 import pandas as pd
 
 from src import config, geo_utils
-from src.data_sources.base import validate_kumamoto_bbox
 from src.logging_utils import get_logger
 
 log = get_logger(__name__)
@@ -158,6 +157,14 @@ def build_transitions(survey: Survey, frames: dict[int, pd.DataFrame]) -> pd.Dat
     df["planning_area"] = df["planning_area"].map(config.PLANNING_AREAS)
     df["zoning"] = df["zoning"].replace("_", "none")
     return df[STAGE1_COLUMNS]
+
+
+def validate_kumamoto_bbox(df: pd.DataFrame) -> pd.Series:
+    """Mask of rows outside Kumamoto Prefecture's bounding box: a coarse check for garbled coordinates."""
+    return (
+        ~df["latitude"].between(config.LAT_MIN, config.LAT_MAX, inclusive="neither")
+        | ~df["longitude"].between(config.LON_MIN, config.LON_MAX, inclusive="neither")
+    )
 
 
 def validate(survey: Survey, df: pd.DataFrame) -> pd.DataFrame:

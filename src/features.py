@@ -20,12 +20,9 @@ import pandas as pd
 
 from src import config, geo_utils
 from src.data_sources.hazards import join_hazards_to_points
-from src.logging_utils import get_logger, status
+from src.logging_utils import get_logger
 
 log = get_logger(__name__)
-
-
-def _status(msg, *args): status(log, msg, *args)
 
 
 STAGE1_COLUMNS = {
@@ -118,7 +115,7 @@ def build_features(stage1_path: str, stage2_path: str, geoparquet_path: str | No
     df.to_csv(stage2_path, index=False, encoding="utf-8-sig")
     if geoparquet_path:
         gdf[df.columns.tolist() + ["geometry"]].to_parquet(geoparquet_path, index=False)
-    _status("Wrote %s.", stage2_path)
+    log.info("Wrote %s.", stage2_path)
 
     model_rows = df[df["post_announcement"] & df["prev_year_pct_change"].notna()]
     print()

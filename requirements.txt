@@ -6,7 +6,6 @@ scikit-learn==1.9.0
 xgboost==3.2.0
 streamlit==1.61.0
 plotly==6.9.0
-python-dotenv==1.2.2
 requests==2.34.2
 
 # Geospatial

@@ -5,7 +5,6 @@ Uses the forecast split from Stage 3 (trained on 2022-2024, predicting 2025
 and 2026) to explain where the selected model goes wrong:
 
   - error by municipality and by year, next to the persistence baseline
-  - the worst 5% of forecasts, exported for inspection
   - permutation importance on the forecast years (how much R² drops when a
     feature is shuffled), which unlike impurity importance is measured on
     data the model did not train on
@@ -19,16 +18,11 @@ import pandas as pd
 from sklearn.inspection import permutation_importance
 
 from src import config, plot_style, spatial_diagnostics
-from src.logging_utils import get_logger, status
+from src.logging_utils import get_logger
 from src.train import load_model_rows
 
 log = get_logger(__name__)
 
-
-def _status(msg, *args): status(log, msg, *args)
-
-
-ANOMALY_QUANTILE = 0.95
 
 FEATURE_LABELS = {
     "prev_year_pct_change": "Last year's % change",
@@ -99,16 +93,10 @@ def run() -> pd.DataFrame:
     log.info("Analysing forecast errors.")
     preds, model, model_name = _load_inputs()
 
-    preds["abs_error"] = preds["residual"].abs()
-    threshold = preds["abs_error"].quantile(ANOMALY_QUANTILE)
-    anomalies = preds[preds["abs_error"] >= threshold].sort_values("abs_error", ascending=False)
-    os.makedirs(config.ANALYSIS_DIR, exist_ok=True)
-    anomalies.to_csv(config.ANOMALY_PATH, index=False, encoding="utf-8-sig")
-    _status("Wrote the worst %d forecasts (|error| >= %.2f pp) to %s.", len(anomalies), threshold, config.ANOMALY_PATH)
 
     by_muni, by_year = _error_tables(preds)
     importance = _plot_permutation_importance(model, model_name)
-    _status("Wrote %s.", config.CHART_PATH)
+    log.info("Wrote %s.", config.CHART_PATH)
 
     diagnostics = spatial_diagnostics.run(residual_df=preds)
 

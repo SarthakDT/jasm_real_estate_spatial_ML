@@ -30,14 +30,10 @@ def load_years() -> dict[int, pd.DataFrame]:
     return lps.load_years(SURVEY)
 
 
-def _build_transitions(frames: dict[int, pd.DataFrame]) -> pd.DataFrame:
-    return lps.build_transitions(SURVEY, frames)
-
-
 def transitions(frames: dict[int, pd.DataFrame] | None = None) -> pd.DataFrame:
     """Validated year-over-year transitions."""
     frames = frames if frames is not None else load_years()
-    return lps.validate(SURVEY, _build_transitions(frames))
+    return lps.validate(SURVEY, lps.build_transitions(SURVEY, frames))
 
 
 def price_history(frames: dict[int, pd.DataFrame], release_year: int, first_year: int) -> pd.DataFrame:

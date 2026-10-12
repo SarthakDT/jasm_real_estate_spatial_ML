@@ -16,7 +16,7 @@ import pandas as pd
 
 from src import config
 from src.data_sources import chika_kouji, land_price_survey, prefectural_survey
-from src.logging_utils import get_logger, status, success
+from src.logging_utils import get_logger
 
 log = get_logger(__name__)
 
@@ -52,14 +52,14 @@ def run() -> dict[str, pd.DataFrame]:
 
     common = land_price_survey.match_common_sites(l01_frames, l02_frames)
     l02["site_id"] = l02["plot_id"].map(common.set_index("l02_plot_id")["l01_plot_id"]).fillna(l02["plot_id"])
-    success(log, "Paired %d L02 plots with an L01 site (%d carry MLIT's common-point flag).",
-            len(common), int(common["flagged"].sum()))
+    log.info("Paired %d L02 plots with an L01 site (%d carry MLIT's common-point flag).",
+             len(common), int(common["flagged"].sum()))
 
     os.makedirs(config.PROCESSED_DIR, exist_ok=True)
     l01.to_csv(config.STAGE1_PATH, index=False, encoding="utf-8-sig")
     l02.to_csv(config.STAGE1_L02_PATH, index=False, encoding="utf-8-sig")
     common.to_csv(config.COMMON_SITES_PATH, index=False, encoding="utf-8-sig")
-    status(log, "Wrote %s, %s and %s.", config.STAGE1_PATH, config.STAGE1_L02_PATH, config.COMMON_SITES_PATH)
+    log.info("Wrote %s, %s and %s.", config.STAGE1_PATH, config.STAGE1_L02_PATH, config.COMMON_SITES_PATH)
 
     for name, frames, t in (("L01 (January)", l01_frames, l01), ("L02 (July)", l02_frames, l02)):
         summary = year_summary(frames, t)

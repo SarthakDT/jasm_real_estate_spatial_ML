@@ -39,12 +39,9 @@ from matplotlib.lines import Line2D
 from src import config, geo_utils, plot_style
 from src.data_sources import chika_kouji, land_price_survey, prefectural_survey
 from src.data_sources.hazards import load_admin_boundaries
-from src.logging_utils import get_logger, status
+from src.logging_utils import get_logger
 
 log = get_logger(__name__)
-
-
-def _status(msg, *args): status(log, msg, *args)
 
 
 PANEL_FIRST_YEAR = 2013          # first L01 price year, so the first annual change is 2014
@@ -400,7 +397,7 @@ def run() -> dict:
     }
     with open(DID_RESULTS_PATH, "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2)
-    _status("Wrote %s and figures in %s.", DID_RESULTS_PATH, config.FIGURES_DIR)
+    log.info("Wrote %s and figures in %s.", DID_RESULTS_PATH, config.FIGURES_DIR)
 
     print()
     for survey in ("L01", "L02"):
