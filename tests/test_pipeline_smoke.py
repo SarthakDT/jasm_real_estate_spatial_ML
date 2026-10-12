@@ -32,7 +32,7 @@ def test_pipeline_end_to_end():
     )
 
     comparison = train.run()
-    expected = {(split, key) for split in train.SPLITS for key in train.CANDIDATES} - {("forecast", "muni_year_mean")}
+    expected = {(split, key) for split in train.SPLITS for key in train.CANDIDATES} - train.SKIPPED
     assert set(zip(comparison["split"], comparison["model_key"])) == expected
     assert comparison["r2"].notna().all()
     model = joblib.load(config.BEST_MODEL_PATH)

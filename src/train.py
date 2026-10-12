@@ -14,6 +14,13 @@ Each candidate is scored on the same evaluation splits:
                  plot appears once per year, so a random split puts the same
                  plot's other years in training and flatters every model.
 
+Two external tests then score models trained on the January survey (L01) on
+the July survey's plots (L02): different plots, different appraisers and a
+valuation date six months later. Sites valued by both surveys are left out.
+
+  external_l02           train on L01 2022-2026, test on L02 2022-2026
+  external_l02_forecast  train on L01 2022-2024, test on L02 2025-2026
+
 Writes data/analysis/model_comparison.csv (one row per split and candidate)
 and the forecast-split predictions of every candidate. The better of RF and
 XGBoost on the forecast split is saved twice (as the plain sklearn/xgboost
@@ -49,7 +56,11 @@ SPLITS = {
     "unseen_areas": f"Unseen areas ({N_BLOCKS} spatial blocks)",
     "forecast": f"Forecast (train 2022-{config.FORECAST_TRAIN_MAX_YEAR}, predict later years)",
     "random_rows": "Random rows (leaky, reference only)",
+    "external_l02": "July survey plots, same years (trained on January survey)",
+    "external_l02_forecast": "July survey plots, 2025-26 (trained on January survey to 2024)",
 }
+# Same-year municipality means do not exist yet when forecasting.
+SKIPPED = {("forecast", "muni_year_mean"), ("external_l02_forecast", "muni_year_mean")}
 
 CANDIDATES = {
     "persistence": "Persistence (last year's change)",
@@ -105,6 +116,35 @@ def load_model_rows() -> pd.DataFrame:
     return df
 
 
+def load_external_rows() -> pd.DataFrame:
+    """L02 rows to test on: post-announcement, with a lag, excluding sites also valued by L01."""
+    if not os.path.isfile(config.STAGE2_L02_PATH):
+        raise FileNotFoundError(f"{config.STAGE2_L02_PATH} missing. Run stage 2 first.")
+    df = pd.read_csv(config.STAGE2_L02_PATH, encoding="utf-8-sig")
+    keep = df["post_announcement"] & df["prev_year_pct_change"].notna() & (df["site_id"] == df["plot_id"])
+    return df[keep].reset_index(drop=True)
+
+
+def external_test(l01: pd.DataFrame, l02: pd.DataFrame) -> tuple[list[dict], int]:
+    """Fit every candidate on L01 rows and score it on L02 rows."""
+    settings = {
+        "external_l02": (l01.index == l01.index, l02.index == l02.index),
+        "external_l02_forecast": ((l01["valuation_year"] <= config.FORECAST_TRAIN_MAX_YEAR).to_numpy(),
+                                  (l02["valuation_year"] > config.FORECAST_TRAIN_MAX_YEAR).to_numpy()),
+    }
+    rows = []
+    for split, (train_mask, test_mask) in settings.items():
+        train, test = l01[train_mask], l02[test_mask]
+        for key, name in CANDIDATES.items():
+            if (split, key) in SKIPPED:
+                continue
+            pred = _make_candidate(key).fit(train, train[config.TARGET_COL]).predict(test)
+            rows.append({"split": split, "split_label": SPLITS[split], "model_key": key, "model": name,
+                         **_metrics(test[config.TARGET_COL], pred)})
+        log.info("  %s done.", SPLITS[split])
+    return rows, len(l02)
+
+
 def make_splits(df: pd.DataFrame) -> dict[str, list[tuple[np.ndarray, np.ndarray]]]:
     idx = np.arange(len(df))
     blocks = assign_spatial_blocks(df, n_blocks=N_BLOCKS)
@@ -146,8 +186,7 @@ def run() -> pd.DataFrame:
     forecast_preds = {}
     for split, folds in splits.items():
         for key, name in CANDIDATES.items():
-            # Same-year municipality means do not exist yet when forecasting.
-            if split == "forecast" and key == "muni_year_mean":
+            if (split, key) in SKIPPED:
                 continue
             pred = evaluate_split(df, folds, key)
             scored = ~np.isnan(pred)
@@ -157,6 +196,8 @@ def run() -> pd.DataFrame:
                 forecast_preds[key] = pred
         log.info("  %s done.", SPLITS[split])
 
+    external_rows, n_external = external_test(df, load_external_rows())
+    rows += external_rows
     comparison = pd.DataFrame(rows)
     os.makedirs(config.ANALYSIS_DIR, exist_ok=True)
     comparison.to_csv(config.MODEL_COMPARISON_PATH, index=False)
@@ -194,6 +235,7 @@ def run() -> pd.DataFrame:
     verdict = "beats" if forecast_r2[best] > persistence else "does NOT beat"
     print(f"  Forecast split: {CANDIDATES[best]} R²={forecast_r2[best]:.3f} {verdict} "
           f"persistence R²={persistence:.3f}.")
+    print(f"  External tests use {n_external} July-survey rows not valued by the January survey.")
     return comparison
 
 
