@@ -1,169 +1,138 @@
 """
-Stage 2 — Geospatial Feature Engineering
-JASM Spatial ML  |  Kumamoto MLIT Chika-Kouji land-price dataset
+Stage 2 — Feature engineering
+MLIT Chika-Kouji benchmark land prices, Kumamoto Prefecture
 
-Reads data/processed_stage1.csv, engineers three spatial/economic features,
-validates the expanded schema, and writes data/processed_stage2.csv.
+Reads stage 1 output for each survey (L01 January, L02 July) and adds:
+  - the target: year-over-year % price change
+  - prev_year_pct_change: the same plot's change the year before (the lag)
+  - distance to the JASM fab
+  - numeric codes for MLIT's land-use, zoning and planning-area categories
+  - flood and landslide hazard flags from NLNI polygons
+
+Writes data/processed/stage2.csv (+ stage2.geoparquet with geometry) for L01
+and stage2_l02.csv for L02.
 """
 
-import logging
 import os
-import sys
 
+import numpy as np
 import pandas as pd
-from geopy.distance import geodesic
 
-# ── Logging: custom SUCCESS / STATUS levels to match expected health report ───
-_SUCCESS = 25
-_STATUS  = 26
-logging.addLevelName(_SUCCESS, "SUCCESS")
-logging.addLevelName(_STATUS,  "STATUS")
-logging.basicConfig(
-    format="[%(levelname)s] %(message)s",
-    level=logging.INFO,
-    stream=sys.stdout,
-)
-log = logging.getLogger(__name__)
+from src import config, geo_utils
+from src.data_sources.hazards import join_hazards_to_points
+from src.logging_utils import get_logger
 
-def _success(msg, *args): log.log(_SUCCESS, msg, *args)
-def _status(msg, *args):  log.log(_STATUS,  msg, *args)
+log = get_logger(__name__)
 
-
-# ── Configuration ─────────────────────────────────────────────────────────────
-BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR    = os.path.join(BASE_DIR, "data")
-INPUT_PATH  = os.path.join(DATA_DIR, "processed_stage1.csv")
-OUTPUT_PATH = os.path.join(DATA_DIR, "processed_stage2.csv")
-
-# WGS84 centroid of the JASM semiconductor fab site, Kikuyo-cho, Kumamoto
-JASM_COORDINATES = (32.8715, 130.8250)
 
 STAGE1_COLUMNS = {
-    "point_id", "municipality", "latitude", "longitude",
-    "past_year_price", "current_year_price", "years_since_announcement",
+    "point_id", "plot_id", "site_id", "survey", "municipality", "valuation_year", "post_announcement",
+    "latitude", "longitude", "past_year_price", "current_year_price",
+    "land_use", "lot_area_m2", "road_width_m", "station_distance_m",
+    "zoning", "planning_area", "far",
+}
+
+# Ordinal codes for tree models. Zoning (用途地域) is grouped from MLIT's 13
+# zone abbreviations into broad classes ordered roughly by permitted density.
+LAND_USE_CODE = {"residential": 0, "prospective residential": 1, "commercial": 2, "industrial": 3}
+PLANNING_AREA_CODE = {"urbanization": 0, "undivided": 1, "control": 2, "outside": 3}
+ZONING_GROUP = {
+    "none": 0,
+    "1低専": 1, "2低専": 1, "田園住": 1,   # low-rise residential
+    "1中専": 2, "2中専": 2,                 # mid-rise residential
+    "1住居": 3, "2住居": 3, "準住居": 3,   # mixed residential
+    "近商": 4, "商業": 4,                   # commercial
+    "準工": 5, "工業": 5, "工専": 5,       # industrial
 }
 
 
-# ── Step A: Load & verify Stage 1 input ──────────────────────────────────────
-def _load_stage1() -> pd.DataFrame:
-    if not os.path.isfile(INPUT_PATH):
-        raise FileNotFoundError(
-            f"Stage 1 output missing: {INPUT_PATH}\n"
-            "Run src/load_data.py first to generate the cleaned dataset."
-        )
-    df = pd.read_csv(INPUT_PATH, encoding="utf-8-sig")
+def _load_stage1(path: str) -> pd.DataFrame:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Stage 1 output missing: {path}. Run stage 1 first.")
+    df = pd.read_csv(path, encoding="utf-8-sig")
     missing = STAGE1_COLUMNS - set(df.columns)
     if missing:
-        raise ValueError(
-            f"Stage 1 CSV is missing required columns: {missing}\n"
-            "Re-run src/load_data.py to regenerate a valid processed_stage1.csv."
-        )
-    log.info("Loaded %d rows from %s.", len(df), INPUT_PATH)
+        raise ValueError(f"{os.path.basename(path)} is missing columns: {missing}. Re-run stage 1.")
+    log.info("Loaded %d rows from %s.", len(df), path)
     return df
 
 
-# ── Step B: Geodesic distance to JASM centroid ───────────────────────────────
-def _compute_distance(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["distance_to_jasm_km"] = df.apply(
-        lambda row: geodesic(
-            (row["latitude"], row["longitude"]), JASM_COORDINATES
-        ).km,
-        axis=1,
+def _add_target_and_lag(df: pd.DataFrame) -> pd.DataFrame:
+    df[config.TARGET_COL] = (df["current_year_price"] - df["past_year_price"]) / df["past_year_price"] * 100.0
+    prev = df[["plot_id", "valuation_year", config.TARGET_COL]].rename(
+        columns={config.TARGET_COL: "prev_year_pct_change"}
     )
-    df["distance_to_jasm_km"] = df["distance_to_jasm_km"].astype("float64")
+    prev["valuation_year"] += 1
+    return df.merge(prev, on=["plot_id", "valuation_year"], how="left")
+
+
+def _encode_categories(df: pd.DataFrame) -> pd.DataFrame:
+    # The 2015-2016 L02 files have no zoning or planning-area fields; take them
+    # from the same plot's next record (they rarely change).
+    by_plot = df.sort_values(["plot_id", "valuation_year"])
+    for col in ("zoning", "planning_area"):
+        df[col] = by_plot.groupby("plot_id")[col].bfill().reindex(df.index)
+    df["land_use_code"] = df["land_use"].map(LAND_USE_CODE)
+    df["planning_area_code"] = df["planning_area"].map(PLANNING_AREA_CODE)
+    df["zoning_group"] = df["zoning"].map(ZONING_GROUP)
+    for col, source in (("land_use_code", "land_use"), ("planning_area_code", "planning_area"), ("zoning_group", "zoning")):
+        unknown = df[col].isna() & df[source].notna()
+        if unknown.any():
+            raise ValueError(f"Unmapped {source} values: {df.loc[unknown, source].unique().tolist()}")
+        df[col] = df[col].astype("Int64")
+    if df.loc[df["post_announcement"], ["zoning_group", "planning_area_code"]].isna().any().any():
+        raise ValueError("Post-announcement rows are missing zoning or planning area.")
     return df
 
 
-# ── Step C: Non-linear inverse spatial decay ─────────────────────────────────
-def _compute_decay(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    # +1 stabilises the denominator: a plot at exactly 0 km yields decay = 1.0
-    df["spatial_decay"] = 1.0 / (df["distance_to_jasm_km"] + 1.0)
-    df["spatial_decay"] = df["spatial_decay"].astype("float64")
-    return df
-
-
-# ── Step D: Target variable ───────────────────────────────────────────────────
-def _compute_target(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["target_price_pct_change"] = (
-        (df["current_year_price"] - df["past_year_price"])
-        / df["past_year_price"]
-    ) * 100.0
-    df["target_price_pct_change"] = df["target_price_pct_change"].astype("float64")
-    return df
-
-
-# ── Step E: Validate engineered columns ──────────────────────────────────────
 def _validate(df: pd.DataFrame) -> pd.DataFrame:
     errors: list[str] = []
-
-    if df["distance_to_jasm_km"].isna().any():
-        errors.append("distance_to_jasm_km contains NaN values.")
-    elif df["distance_to_jasm_km"].le(0).any():
-        errors.append(
-            f"{df['distance_to_jasm_km'].le(0).sum()} record(s) have "
-            "distance_to_jasm_km <= 0 (impossible for off-site plots)."
-        )
-
-    if df["spatial_decay"].isna().any():
-        errors.append("spatial_decay contains NaN values.")
-    else:
-        oob = ~df["spatial_decay"].between(0.0, 1.0, inclusive="neither")
-        # A plot sitting exactly at JASM gates would yield decay == 1.0 (valid)
-        oob = oob & (df["spatial_decay"] != 1.0)
-        if oob.any():
-            errors.append(
-                f"{oob.sum()} record(s) have spatial_decay outside (0.0, 1.0]."
-            )
-
-    if df["target_price_pct_change"].isna().any():
-        errors.append("target_price_pct_change contains NaN values.")
-    elif not df["target_price_pct_change"].apply(
-        lambda x: x == x and x != float("inf") and x != float("-inf")
-    ).all():
-        errors.append("target_price_pct_change contains infinite values.")
-
+    if df["distance_to_jasm_km"].isna().any() or df["distance_to_jasm_km"].le(0).any():
+        errors.append("distance_to_jasm_km has missing or non-positive values.")
+    if not np.isfinite(df[config.TARGET_COL]).all():
+        errors.append(f"{config.TARGET_COL} has missing or infinite values.")
+    lag_missing = df["post_announcement"] & df["prev_year_pct_change"].isna()
+    if lag_missing.sum() > 0.05 * df["post_announcement"].sum():
+        errors.append(f"{lag_missing.sum()} post-announcement rows have no previous-year change.")
+    for col in ("flood_risk_class", "in_landslide_zone"):
+        if df[col].isna().any():
+            errors.append(f"{col} has missing values.")
     if errors:
-        raise ValueError(
-            "Stage 2 feature validation failed:\n  • " + "\n  • ".join(errors)
-        )
-
+        raise ValueError("Stage 2 validation failed:\n  • " + "\n  • ".join(errors))
     return df
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+def build_features(stage1_path: str, stage2_path: str, geoparquet_path: str | None = None) -> pd.DataFrame:
+    df = _load_stage1(stage1_path)
+    df["distance_to_jasm_km"] = geo_utils.distance_to_jasm_km(df)
+    df = _add_target_and_lag(df)
+    df = _encode_categories(df)
+
+    gdf = join_hazards_to_points(geo_utils.to_gdf(df))
+    df = _validate(pd.DataFrame(gdf.drop(columns="geometry")))
+
+    os.makedirs(config.PROCESSED_DIR, exist_ok=True)
+    df.to_csv(stage2_path, index=False, encoding="utf-8-sig")
+    if geoparquet_path:
+        gdf[df.columns.tolist() + ["geometry"]].to_parquet(geoparquet_path, index=False)
+    log.info("Wrote %s.", stage2_path)
+
+    model_rows = df[df["post_announcement"] & df["prev_year_pct_change"].notna()]
+    print()
+    print(f"  {df['survey'].iloc[0]} rows                  : {len(df)} ({len(model_rows)} post-announcement rows with a lag)")
+    print(f"  Distance to fab           : {df['distance_to_jasm_km'].min():.1f}-{df['distance_to_jasm_km'].max():.1f} km")
+    print(f"  Annual % change           : {df[config.TARGET_COL].min():.1f} to {df[config.TARGET_COL].max():.1f}")
+    print(f"  Flood risk class          : {df['flood_risk_class'].value_counts().sort_index().to_dict()}")
+    print(f"  Plots in landslide zones  : {df.loc[df['in_landslide_zone'], 'plot_id'].nunique()}")
+    return df
+
+
 def run() -> pd.DataFrame:
-    log.info("Initiating Feature Engineering Pipeline...")
-
-    df = _load_stage1()
-    df = _compute_distance(df)
-    df = _compute_decay(df)
-    df = _compute_target(df)
-    df = _validate(df)
-
-    # ── DoD health report ─────────────────────────────────────────────────────
-    _success("Computed geodesic distances to JASM centroid using WGS84 standard.")
-    _success("Non-linear spatial decay vectors generated and stabilized against zero-division.")
-    _success("Target variable 'target_price_pct_change' computed across all temporal windows.")
-    _status("Cleaned feature matrix cached to %s. Ready for Stage 3 Model Training.", OUTPUT_PATH)
-
-    # Save
-    os.makedirs(DATA_DIR, exist_ok=True)
-    df.to_csv(OUTPUT_PATH, index=False, encoding="utf-8-sig")
-
-    # Summary diagnostics
-    print()
-    print(f"  Rows              : {len(df)}")
-    print(f"  Columns           : {list(df.columns)}")
-    print(f"  Distance range    : [{df['distance_to_jasm_km'].min():.2f} km, {df['distance_to_jasm_km'].max():.2f} km]")
-    print(f"  Decay range       : [{df['spatial_decay'].min():.6f}, {df['spatial_decay'].max():.6f}]")
-    print(f"  Target pct change : [{df['target_price_pct_change'].min():.2f}%, {df['target_price_pct_change'].max():.2f}%]")
-    print()
-    print(df.dtypes.to_string())
-
-    return df
+    """Build features for both surveys; returns the L01 frame (the modelling data)."""
+    log.info("Building features.")
+    l01 = build_features(config.STAGE1_PATH, config.STAGE2_PATH, config.STAGE2_GEOPARQUET_PATH)
+    build_features(config.STAGE1_L02_PATH, config.STAGE2_L02_PATH)
+    return l01
 
 
 if __name__ == "__main__":

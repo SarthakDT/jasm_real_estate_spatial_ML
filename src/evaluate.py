@@ -1,188 +1,122 @@
 """
-Stage 4 — Validation & Interpretability
-JASM Spatial ML  |  Kumamoto MLIT Chika-Kouji land-price dataset
+Stage 4 — Forecast error analysis
 
-Loads models/jasm_rf_model.pkl and data/processed_stage2.csv, reconstructs
-the identical test split from Stage 3, computes residuals, exports the top 5%
-worst predictions to data/evaluation_anomalies.csv, and saves a feature
-importance chart to models/feature_importance.png.
+Uses the forecast split from Stage 3 (trained on 2022-2024, predicting 2025
+and 2026) to explain where the selected model goes wrong:
+
+  - error by municipality and by year, next to the persistence baseline
+  - permutation importance on the forecast years (how much R² drops when a
+    feature is shuffled), which unlike impurity importance is measured on
+    data the model did not train on
+  - Moran's I of the forecast residuals, to see whether errors cluster in space
 """
 
-import logging
 import os
-import sys
 
 import joblib
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.inspection import permutation_importance
 
-# ── Logging: custom SUCCESS / STATUS levels to match expected health report ───
-_SUCCESS = 25
-_STATUS  = 26
-logging.addLevelName(_SUCCESS, "SUCCESS")
-logging.addLevelName(_STATUS,  "STATUS")
-logging.basicConfig(
-    format="[%(levelname)s] %(message)s",
-    level=logging.INFO,
-    stream=sys.stdout,
-)
-log = logging.getLogger(__name__)
+from src import config, plot_style, spatial_diagnostics
+from src.logging_utils import get_logger
+from src.train import load_model_rows
 
-def _success(msg, *args): log.log(_SUCCESS, msg, *args)
-def _status(msg, *args):  log.log(_STATUS,  msg, *args)
+log = get_logger(__name__)
 
 
-# ── Configuration (mirrors src/train.py exactly) ──────────────────────────────
-BASE_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR     = os.path.join(BASE_DIR, "data")
-MODEL_DIR    = os.path.join(BASE_DIR, "models")
-INPUT_PATH   = os.path.join(DATA_DIR,  "processed_stage2.csv")
-MODEL_PATH   = os.path.join(MODEL_DIR, "jasm_rf_model.pkl")
-ANOMALY_PATH = os.path.join(DATA_DIR,  "evaluation_anomalies.csv")
-CHART_PATH   = os.path.join(MODEL_DIR, "feature_importance.png")
-
-FEATURE_COLS = [
-    "latitude",
-    "longitude",
-    "past_year_price",
-    "years_since_announcement",
-    "distance_to_jasm_km",
-    "spatial_decay",
-]
-TARGET_COL   = "target_price_pct_change"
-TEST_SIZE    = 0.25
-RANDOM_STATE = 42
-ANOMALY_PCT  = 0.95
+FEATURE_LABELS = {
+    "prev_year_pct_change": "Last year's % change",
+    "distance_to_jasm_km": "Distance to fab (km)",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "past_year_price": "Last year's price (¥/m²)",
+    "valuation_year": "Valuation year",
+    "lot_area_m2": "Lot area (m²)",
+    "station_distance_m": "Distance to station (m)",
+    "road_width_m": "Front road width (m)",
+    "far": "Floor-area ratio (%)",
+    "land_use_code": "Land use",
+    "zoning_group": "Zoning",
+    "planning_area_code": "Planning area",
+    "flood_risk_class": "Flood risk class",
+    "in_landslide_zone": "In landslide zone",
+}
 
 
-# ── Step A: Load model & data, reconstruct identical test split ───────────────
 def _load_inputs():
-    if not os.path.isfile(MODEL_PATH):
-        raise FileNotFoundError(
-            f"Trained model missing: {MODEL_PATH}\n"
-            "Run src/train.py first to generate the serialized model."
-        )
-    if not os.path.isfile(INPUT_PATH):
-        raise FileNotFoundError(
-            f"Feature matrix missing: {INPUT_PATH}\n"
-            "Run src/features.py first to generate processed_stage2.csv."
-        )
+    for path in (config.FORECAST_PREDICTIONS_PATH, config.FORECAST_MODEL_PATH):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"{path} missing. Run stage 3 first.")
+    preds = pd.read_csv(config.FORECAST_PREDICTIONS_PATH, encoding="utf-8-sig")
+    model = joblib.load(config.FORECAST_MODEL_PATH)
+    model_name = open(config.BEST_MODEL_NAME_PATH, encoding="utf-8").read().strip()
+    return preds, model, model_name
 
-    model = joblib.load(MODEL_PATH)
-    df    = pd.read_csv(INPUT_PATH, encoding="utf-8-sig")
 
-    required = set(FEATURE_COLS) | {TARGET_COL, "municipality"}
-    missing  = required - set(df.columns)
-    if missing:
-        raise ValueError(f"processed_stage2.csv is missing columns: {missing}")
-
-    X = df[FEATURE_COLS]
-    y = df[TARGET_COL]
-    _, X_test, _, y_test = train_test_split(
-        X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE
+def _error_tables(preds: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    errors = preds.assign(
+        model_abs_error=(preds["actual"] - preds["predicted"]).abs(),
+        persistence_abs_error=(preds["actual"] - preds["pred_persistence"]).abs(),
     )
-    log.info(
-        "Loaded model and %d rows. Reconstructed test split: %d rows.",
-        len(df), len(X_test),
+    cols = ["model_abs_error", "persistence_abs_error"]
+    by_muni = errors.groupby("municipality")[cols].mean().assign(n=errors.groupby("municipality").size())
+    by_year = errors.groupby("valuation_year")[cols].mean().assign(n=errors.groupby("valuation_year").size())
+    return by_muni.sort_values("model_abs_error", ascending=False), by_year
+
+
+def _plot_permutation_importance(model, model_name: str) -> pd.Series:
+    df = load_model_rows()
+    test = df[df["valuation_year"] > config.FORECAST_TRAIN_MAX_YEAR]
+    result = permutation_importance(
+        model, test[config.FEATURE_COLS], test[config.TARGET_COL],
+        n_repeats=20, random_state=config.RANDOM_STATE, scoring="r2",
     )
-    return model, df, X_test, y_test
+    imp = pd.DataFrame({"mean": result.importances_mean, "std": result.importances_std},
+                       index=[FEATURE_LABELS.get(c, c) for c in config.FEATURE_COLS]).sort_values("mean")
+
+    fig, ax = plot_style.figure(8, 5.5)
+    ax.barh(imp.index, imp["mean"], xerr=imp["std"], color=plot_style.SERIES, height=0.6,
+            error_kw={"ecolor": plot_style.TEXT_SECONDARY, "elinewidth": 1, "capsize": 2})
+    ax.axvline(0, color=plot_style.TEXT_SECONDARY, linewidth=0.8)
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=plot_style.GRID, linewidth=0.8)
+    ax.set_xlabel("Drop in forecast R² when the feature is shuffled")
+    plot_style.title(ax, f"What drives the {model_name} forecast",
+                     f"Permutation importance on the {test['valuation_year'].min()}–{test['valuation_year'].max()} "
+                     "forecasts, ±1 sd over 20 shuffles")
+    os.makedirs(config.FIGURES_DIR, exist_ok=True)
+    plot_style.save(fig, config.CHART_PATH)
+    return imp["mean"].sort_values(ascending=False)
 
 
-# ── Step B: Build evaluation matrix ──────────────────────────────────────────
-def _build_eval_matrix(model, df, X_test, y_test) -> pd.DataFrame:
-    eval_df = X_test.copy()
-    eval_df["municipality"] = df.loc[X_test.index, "municipality"]
-    eval_df["actual"]       = y_test
-    eval_df["predicted"]    = model.predict(X_test)
-    eval_df["residual"]     = eval_df["actual"] - eval_df["predicted"]
-    eval_df["abs_error"]    = eval_df["residual"].abs()
-    return eval_df
-
-
-# ── Step D: Anomaly extraction ────────────────────────────────────────────────
-def _extract_anomalies(eval_df: pd.DataFrame) -> tuple[pd.DataFrame, float]:
-    threshold = eval_df["abs_error"].quantile(ANOMALY_PCT)
-    anomalies = (
-        eval_df[eval_df["abs_error"] >= threshold]
-        .sort_values("abs_error", ascending=False)
-    )
-    anomalies.to_csv(ANOMALY_PATH, index=False, encoding="utf-8-sig")
-    return anomalies, threshold
-
-
-# ── Step E: Feature importance chart ─────────────────────────────────────────
-def _plot_feature_importance(model) -> None:
-    importances  = model.feature_importances_
-    indices      = np.argsort(importances)           # ascending → highest bar at top
-    sorted_feats = [FEATURE_COLS[i] for i in indices]
-    sorted_imps  = importances[indices]
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.barh(sorted_feats, sorted_imps, color="steelblue")
-    ax.set_xlabel("Feature Importance")
-    ax.set_title("JASM Random Forest — Feature Importances")
-    plt.tight_layout()
-    plt.savefig(CHART_PATH, dpi=150)
-    plt.close()
-
-
-# ── Main pipeline ─────────────────────────────────────────────────────────────
 def run() -> pd.DataFrame:
-    log.info("Initiating Validation & Interpretability Pipeline...")
+    log.info("Analysing forecast errors.")
+    preds, model, model_name = _load_inputs()
 
-    model, df, X_test, y_test = _load_inputs()
 
-    # Step B
-    eval_df = _build_eval_matrix(model, df, X_test, y_test)
-    _success("Comprehensive residual calculations mapped across test matrices.")
+    by_muni, by_year = _error_tables(preds)
+    importance = _plot_permutation_importance(model, model_name)
+    log.info("Wrote %s.", config.CHART_PATH)
 
-    # Step C: spatial & temporal slices (computed now, printed after DoD)
-    spatial_slice  = (
-        eval_df.groupby("municipality")["abs_error"]
-        .mean()
-        .sort_values(ascending=False)
-    )
-    temporal_slice = (
-        eval_df.groupby("years_since_announcement")["abs_error"]
-        .mean()
-        .sort_values()
-    )
+    diagnostics = spatial_diagnostics.run(residual_df=preds)
 
-    # Step D
-    anomalies, threshold = _extract_anomalies(eval_df)
-    _success(
-        "Spatial blind spots evaluated. Anomaly threshold locked at >= %.2f percentage points.",
-        threshold,
-    )
-    _success("Top 5%% high-variance predictions exported to %s.", ANOMALY_PATH)
-
-    # Step E
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    _plot_feature_importance(model)
-    _success("Feature importance graphics generated and saved to %s.", CHART_PATH)
-
-    # Step F: DoD status line
-    _status(
-        "Model validation complete. Ready for Stage 5 Production Prep & Repository Packaging."
-    )
-
-    # ── Diagnostics ───────────────────────────────────────────────────────────
     print()
-    print(f"  Test rows evaluated : {len(eval_df)}")
-    print(f"  Anomaly threshold   : {threshold:.4f} pp")
-    print(f"  Anomaly rows (5%)   : {len(anomalies)}")
+    print(f"  Model: {model_name}, forecast rows: {len(preds)}")
     print()
-    print("  Mean Abs Error by Municipality (top 8):")
-    for muni, err in spatial_slice.head(8).items():
-        print(f"    {muni:<30} {err:.4f} pp")
+    print("  Mean absolute error by year (pp)")
+    print(by_year.round(2).to_string())
     print()
-    print("  Mean Abs Error by Years Since Announcement:")
-    for ysa, err in temporal_slice.items():
-        print(f"    YSA={int(ysa)}  {err:.4f} pp")
-
-    return eval_df
+    print("  Municipalities with the largest model errors (pp)")
+    print(by_muni.head(8).round(2).to_string())
+    print()
+    print("  Permutation importance (drop in R²)")
+    print(importance.round(3).to_string())
+    print()
+    obs, res = diagnostics["observed_change"], diagnostics["forecast_residuals"]
+    print(f"  Moran's I, observed change (mean over years): {obs['mean_morans_i']:.3f}")
+    print(f"  Moran's I, forecast residuals (mean over years): {res['mean_morans_i']:.3f} "
+          f"(max p={res['max_p_value']:.3f})")
+    return preds
 
 
 if __name__ == "__main__":

@@ -1,61 +1,43 @@
 """
-JASM Spatial ML — Production Master Orchestrator
+Run the JASM land-price pipeline.
 
 Usage:
-  python main.py --all          # Execute entire pipeline end-to-end
-  python main.py --stage 1      # Execute a single targeted stage (1-4)
+  python main.py --all          # run every stage in order
+  python main.py --stage 5      # run a single stage (1-5)
 """
 
 import argparse
 import sys
 import time
 
-from src import evaluate, features, load_data, train
+from src import evaluate, fab_impact, features, load_data, train
+
+STAGES = {
+    1: ("Load MLIT land-price data", load_data.run),
+    2: ("Build features", features.run),
+    3: ("Train and compare models", train.run),
+    4: ("Analyse forecast errors", evaluate.run),
+    5: ("Estimate the fab's effect on land prices", fab_impact.run),
+}
 
 
-def run_pipeline() -> None:
-    parser = argparse.ArgumentParser(description="JASM Spatial ML Production Pipeline")
-    parser.add_argument(
-        "--all", action="store_true", help="Execute entire pipeline end-to-end"
-    )
-    parser.add_argument(
-        "--stage", type=int, choices=[1, 2, 3, 4], help="Execute a single targeted stage"
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="JASM land-price pipeline")
+    parser.add_argument("--all", action="store_true", help="run every stage in order")
+    parser.add_argument("--stage", type=int, choices=sorted(STAGES), help="run a single stage")
     args = parser.parse_args()
 
     if not (args.all or args.stage):
         parser.print_help()
         sys.exit(1)
 
-    start_time = time.time()
-    print("=========================================================")
-    print("STARTING JASM SPATIAL MACHINE LEARNING PRODUCTION PIPELINE")
-    print("=========================================================\n")
-
-    try:
-        if args.all or args.stage == 1:
-            print("[PIPELINE EVENT] Launching Stage 1: Data Ingestion...")
-            load_data.run()
-
-        if args.all or args.stage == 2:
-            print("\n[PIPELINE EVENT] Launching Stage 2: Feature Engineering...")
-            features.run()
-
-        if args.all or args.stage == 3:
-            print("\n[PIPELINE EVENT] Launching Stage 3: Architecture Training...")
-            train.run()
-
-        if args.all or args.stage == 4:
-            print("\n[PIPELINE EVENT] Launching Stage 4: Validation Diagnostics...")
-            evaluate.run()
-
-        elapsed = time.time() - start_time
-        print(f"\n[SUCCESS] Pipeline completed successfully in {elapsed:.2f} seconds.")
-
-    except Exception as e:
-        print(f"\n[CRITICAL FAILURE] Pipeline execution halted due to error: {e}")
-        sys.exit(1)
+    start = time.time()
+    for number, (name, run) in STAGES.items():
+        if args.all or args.stage == number:
+            print(f"\n=== Stage {number}: {name} ===")
+            run()
+    print(f"\nDone in {time.time() - start:.1f}s.")
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    main()

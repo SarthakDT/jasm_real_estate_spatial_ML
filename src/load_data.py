@@ -1,318 +1,74 @@
 """
-Stage 1 — Data Ingestion & Schema Validation
-JASM Spatial ML  |  Kumamoto MLIT Chika-Kouji land-price dataset
+Stage 1 — Load both MLIT land-price surveys.
 
-Reads 8 years of MLIT GeoJSON (2019-2026), constructs consecutive-year
-price-transition rows, enforces the Stage 1 data contract, and writes
-data/processed_stage1.csv.
+  L01  Chika-Kouji, valued January 1  -> data/processed/stage1.csv
+  L02  Prefectural survey, July 1     -> data/processed/stage1_l02.csv
+
+About 20 sites are valued by both surveys. They are paired by location
+(data/processed/common_sites.csv) and share a site_id, so later analysis does
+not count one physical plot as two independent observations.
 """
 
-import json
-import logging
 import os
-import sys
+from decimal import ROUND_HALF_UP, Decimal
 
-import numpy as np
 import pandas as pd
 
-# ── Logging: custom SUCCESS / STATUS levels to match expected health report ───
-_SUCCESS = 25
-_STATUS  = 26
-logging.addLevelName(_SUCCESS, "SUCCESS")
-logging.addLevelName(_STATUS,  "STATUS")
-logging.basicConfig(
-    format="[%(levelname)s] %(message)s",
-    level=logging.INFO,
-    stream=sys.stdout,
-)
-log = logging.getLogger(__name__)
+from src import config
+from src.data_sources import chika_kouji, land_price_survey, prefectural_survey
+from src.logging_utils import get_logger
 
-def _success(msg, *args): log.log(_SUCCESS, msg, *args)
-def _status(msg, *args):  log.log(_STATUS,  msg, *args)
+log = get_logger(__name__)
 
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR    = os.path.join(BASE_DIR, "data")
-OUTPUT_PATH = os.path.join(DATA_DIR, "processed_stage1.csv")
-
-ANNOUNCEMENT_YEAR = 2021
-YEARS             = list(range(2019, 2027))
-LAT_MIN, LAT_MAX  = 32.0, 33.2
-LON_MIN, LON_MAX  = 130.0, 131.2
-
-# MLIT GeoJSON column names shifted twice across the 2019-2026 data releases.
-# Verified by inspecting the first feature of each year's file.
-_SCHEMA: dict[tuple, dict] = {
-    (2019, 2021): {"year": "L01_005", "price": "L01_006", "muni_code": "L01_021"},
-    (2022, 2023): {"year": "L01_005", "price": "L01_006", "muni_code": "L01_022"},
-    (2024, 2026): {"year": "L01_007", "price": "L01_008", "muni_code": "L01_001"},
-}
-
-# JIS X 0402 municipality codes present in Kumamoto prefecture (43) dataset.
-MUNI_NAMES: dict[str, str] = {
-    "43101": "Kumamoto-shi Chuo-ku",
-    "43102": "Kumamoto-shi Higashi-ku",
-    "43103": "Kumamoto-shi Nishi-ku",
-    "43104": "Kumamoto-shi Minami-ku",
-    "43105": "Kumamoto-shi Kita-ku",
-    "43202": "Yatsushiro-shi",
-    "43203": "Hitoyoshi-shi",
-    "43204": "Arao-shi",
-    "43205": "Minamata-shi",
-    "43206": "Tamana-shi",
-    "43208": "Yamaga-shi",
-    "43210": "Kikuchi-shi",
-    "43211": "Uto-shi",
-    "43213": "Kamiamakusa-shi",
-    "43214": "Uki-shi",
-    "43215": "Amakusa-shi",
-    "43216": "Aso-shi",
-    "43368": "Kikuyo-cho",
-    "43403": "Misato-machi",
-    "43404": "Mashiki-machi",
-    "43441": "Nankan-machi",
-    "43442": "Nagasu-machi",
-    "43443": "Nagomi-machi",
-    "43482": "Kashima-machi",
-}
-_VALID_MUNIS = set(MUNI_NAMES.values())
+def _mlit_round(past: int, current: int) -> float:
+    """% change rounded to one decimal, halves away from zero (MLIT's convention)."""
+    return float((Decimal(current - past) / Decimal(past) * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
-# ── Step A: Raw input verification ────────────────────────────────────────────
-def _schema_for_year(year: int) -> dict:
-    for (lo, hi), cols in _SCHEMA.items():
-        if lo <= year <= hi:
-            return cols
-    raise ValueError(f"No column schema defined for year {year}.")
-
-
-def _geojson_path(year: int) -> str:
-    short = str(year)[2:]
-    path  = os.path.join(DATA_DIR, f"L01-{short}_43_GML", f"L01-{short}_43.geojson")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(
-            f"GeoJSON missing: {path}\n"
-            "Download the MLIT Kumamoto land-price archives and extract them into data/."
-        )
-    return path
-
-
-def _load_year(year: int) -> pd.DataFrame:
-    """Parse one year's GeoJSON into a flat DataFrame with canonical columns."""
-    path = _geojson_path(year)
-    cols = _schema_for_year(year)
-
-    with open(path, encoding="utf-8-sig") as fh:
-        gj = json.load(fh)
-
+def year_summary(frames: dict[int, pd.DataFrame], transitions: pd.DataFrame) -> pd.DataFrame:
+    """Per-year check: records, share linked to the previous year, mismatches with MLIT's published rate."""
     rows = []
-    for feat in gj["features"]:
-        p = feat["properties"]
-        c = feat["geometry"]["coordinates"]   # [longitude, latitude]
+    for year, df in sorted(frames.items()):
+        t = transitions[(transitions["valuation_year"] == year) & transitions["published_change_pct"].notna()]
+        computed = [_mlit_round(p, c) for p, c in zip(t["past_year_price"], t["current_year_price"])]
         rows.append({
-            "latitude":  float(c[1]),
-            "longitude": float(c[0]),
-            "year":      p.get(cols["year"]),
-            "price":     p.get(cols["price"]),
-            "muni_code": str(p.get(cols["muni_code"], "")).strip(),
+            "year": year,
+            "records": len(df),
+            "numbers_unique": df["number"].is_unique,
+            "linked_share": df["linked"].mean() if year != min(frames) else float("nan"),
+            "published_rates": len(t),
+            "rate_mismatches": int(sum(c != p for c, p in zip(computed, t["published_change_pct"]))),
         })
-
-    df = pd.DataFrame(rows)
-
-    # Step B: strip ¥-signs, commas, whitespace before numeric cast
-    df["price"] = (
-        df["price"].astype(str).str.replace(r"[^\d]", "", regex=True)
-    )
-    df["price"] = pd.to_numeric(df["price"], errors="coerce")
-    df["year"]  = pd.to_numeric(df["year"],  errors="coerce")
-
-    df = df.dropna(subset=["price", "year"])
-    df["price"] = df["price"].astype("int64")
-    df["year"]  = df["year"].astype("int64")
-
-    log.info("  %d: %d records loaded", year, len(df))
-    return df
+    return pd.DataFrame(rows).set_index("year")
 
 
-# ── Transition builder ────────────────────────────────────────────────────────
-def _build_transitions(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Pairs consecutive (t-1, t) year records for each benchmark plot.
-    Only transitions where current year >= ANNOUNCEMENT_YEAR are kept,
-    so years_since_announcement is always >= 0.
-    """
-    df_raw = df_raw.copy()
-    # Stable cross-year plot identifier: municipality + rounded coordinates
-    df_raw["plot_key"] = (
-        df_raw["muni_code"]
-        + "_" + df_raw["latitude"].round(5).astype(str)
-        + "_" + df_raw["longitude"].round(5).astype(str)
-    )
+def run() -> dict[str, pd.DataFrame]:
+    log.info("Loading MLIT land-price surveys.")
+    l01_frames = chika_kouji.load_years()
+    l02_frames = prefectural_survey.load_years()
+    l01 = chika_kouji.transitions(l01_frames)
+    l02 = prefectural_survey.transitions(l02_frames)
 
-    rows = []
-    for plot_key, grp in df_raw.groupby("plot_key", sort=False):
-        grp = grp.sort_values("year").reset_index(drop=True)
-        for i in range(1, len(grp)):
-            prev, curr = grp.iloc[i - 1], grp.iloc[i]
-            if int(curr["year"]) - int(prev["year"]) != 1:
-                continue   # gap in data — skip non-consecutive pair
-            if int(curr["year"]) < ANNOUNCEMENT_YEAR:
-                continue   # pre-announcement pair — outside target window
-            ysa       = int(curr["year"]) - ANNOUNCEMENT_YEAR
-            muni_code = str(curr["muni_code"])
-            lat       = round(float(curr["latitude"]),  5)
-            lon       = round(float(curr["longitude"]), 5)
-            rows.append({
-                "point_id":                  f"{muni_code}_{lat}_{lon}_Y{int(curr['year'])}",
-                "municipality":              MUNI_NAMES.get(muni_code, muni_code),
-                "latitude":                  lat,
-                "longitude":                 lon,
-                "past_year_price":           int(prev["price"]),
-                "current_year_price":        int(curr["price"]),
-                "years_since_announcement":  ysa,
-            })
+    common = land_price_survey.match_common_sites(l01_frames, l02_frames)
+    l02["site_id"] = l02["plot_id"].map(common.set_index("l02_plot_id")["l01_plot_id"]).fillna(l02["plot_id"])
+    log.info("Paired %d L02 plots with an L01 site (%d carry MLIT's common-point flag).",
+             len(common), int(common["flagged"].sum()))
 
-    return pd.DataFrame(rows)
+    os.makedirs(config.PROCESSED_DIR, exist_ok=True)
+    l01.to_csv(config.STAGE1_PATH, index=False, encoding="utf-8-sig")
+    l02.to_csv(config.STAGE1_L02_PATH, index=False, encoding="utf-8-sig")
+    common.to_csv(config.COMMON_SITES_PATH, index=False, encoding="utf-8-sig")
+    log.info("Wrote %s, %s and %s.", config.STAGE1_PATH, config.STAGE1_L02_PATH, config.COMMON_SITES_PATH)
 
-
-# ── Step C: Null evacuation + full schema validation ─────────────────────────
-def _validate(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Enforces the Stage 1 data contract.
-    Returns a cleaned, fully-typed DataFrame.
-    Raises ValueError listing every violation found.
-    """
-    required = {
-        "point_id", "municipality", "latitude", "longitude",
-        "past_year_price", "current_year_price", "years_since_announcement",
-    }
-    missing_cols = required - set(df.columns)
-    if missing_cols:
-        raise ValueError(f"Missing required columns: {missing_cols}")
-
-    df = df.copy()
-
-    # Coerce all numeric columns (catches stray strings/objects)
-    df["latitude"]               = pd.to_numeric(df["latitude"],               errors="coerce")
-    df["longitude"]              = pd.to_numeric(df["longitude"],               errors="coerce")
-    df["past_year_price"]        = pd.to_numeric(df["past_year_price"],         errors="coerce")
-    df["current_year_price"]     = pd.to_numeric(df["current_year_price"],      errors="coerce")
-    df["years_since_announcement"] = pd.to_numeric(
-        df["years_since_announcement"], errors="coerce"
-    )
-
-    # Null evacuation: drop rows where either target price is missing
-    n_before = len(df)
-    df = df.dropna(subset=["current_year_price", "past_year_price"])
-    n_dropped = n_before - len(df)
-    if n_dropped:
-        log.warning(
-            "Dropped %d row(s) with null price values "
-            "(likely rural plots that skipped an appraisal cycle).",
-            n_dropped,
-        )
-
-    # Impute auxiliary NaNs with the local-municipality historical median.
-    # A global fallback handles the rare case where an entire municipality is null.
-    for col in ("latitude", "longitude", "years_since_announcement"):
-        if df[col].isna().any():
-            group_median = df.groupby("municipality")[col].transform("median")
-            df[col] = df[col].fillna(group_median).fillna(df[col].median())
-
-    # Lock in final data types
-    df["latitude"]               = df["latitude"].astype("float64")
-    df["longitude"]              = df["longitude"].astype("float64")
-    df["past_year_price"]        = df["past_year_price"].astype("int64")
-    df["current_year_price"]     = df["current_year_price"].astype("int64")
-    df["years_since_announcement"] = df["years_since_announcement"].astype("int64")
-    df["point_id"]               = df["point_id"].astype(str)
-    df["municipality"]           = df["municipality"].astype(str)
-
-    # ── Rule checks ───────────────────────────────────────────────────────────
-    errors: list[str] = []
-
-    dup_count = df["point_id"].duplicated().sum()
-    if dup_count:
-        errors.append(f"{dup_count} duplicate point_id value(s) detected.")
-
-    bad_muni = ~df["municipality"].isin(_VALID_MUNIS)
-    if bad_muni.any():
-        errors.append(
-            f"Unrecognised municipality values: "
-            f"{df.loc[bad_muni, 'municipality'].unique().tolist()}"
-        )
-
-    # CRS audit: points outside the WGS84 Kumamoto bounding box indicate
-    # possible Tokyo Datum contamination, which causes ~400-450 m positional drift.
-    oob = (
-        ~df["latitude"].between(LAT_MIN, LAT_MAX, inclusive="neither")
-        | ~df["longitude"].between(LON_MIN, LON_MAX, inclusive="neither")
-    )
-    if oob.any():
-        errors.append(
-            f"{oob.sum()} record(s) fall outside Kumamoto WGS84 bounds "
-            f"(lat {LAT_MIN}–{LAT_MAX}, lon {LON_MIN}–{LON_MAX}). "
-            "Suspected Tokyo Datum contamination (~400–450 m positional drift)."
-        )
-
-    if df["past_year_price"].le(0).any():
-        errors.append("past_year_price contains values ≤ 0.")
-    if df["current_year_price"].le(0).any():
-        errors.append("current_year_price contains values ≤ 0.")
-
-    bad_ysa = ~df["years_since_announcement"].between(0, 6)
-    if bad_ysa.any():
-        errors.append(
-            f"years_since_announcement out of range [0, 6]: "
-            f"{df.loc[bad_ysa, 'years_since_announcement'].unique().tolist()}"
-        )
-
-    if errors:
-        raise ValueError(
-            "Stage 1 schema validation failed:\n  • " + "\n  • ".join(errors)
-        )
-
-    return df
-
-
-# ── Main pipeline ─────────────────────────────────────────────────────────────
-def run() -> pd.DataFrame:
-    log.info("Initiating Ingestion Pipeline for JASM Spatial ML...")
-
-    # Load all 8 years
-    frames = [_load_year(y) for y in YEARS]
-    df_raw = pd.concat(frames, ignore_index=True)
-    log.info("Combined raw dataset: %d records across %d year files.", len(df_raw), len(YEARS))
-
-    # Build year-transition pairs (past_year_price → current_year_price)
-    df = _build_transitions(df_raw)
-    log.info("Year-transition pairs constructed: %d rows.", len(df))
-
-    # Validate and clean
-    df = _validate(df)
-
-    # ── DoD health report ─────────────────────────────────────────────────────
-    _success("Verified 0 duplicate records across point_id attributes.")
-    _success("Data frame type matching checked. Coordinate bounding geometry verified.")
-    _status("Cleaned dataset safely cached to %s. Ready for Stage 2.", OUTPUT_PATH)
-
-    # Save
-    os.makedirs(DATA_DIR, exist_ok=True)
-    df.to_csv(OUTPUT_PATH, index=False, encoding="utf-8-sig")
-
-    # Summary diagnostics
-    print()
-    print(f"  Rows       : {len(df)}")
-    print(f"  Columns    : {list(df.columns)}")
-    print(f"  Years (YSA): {sorted(df['years_since_announcement'].unique())}")
-    print(f"  Munis      : {df['municipality'].nunique()} municipalities")
-    print(f"  Lat range  : [{df['latitude'].min():.4f}, {df['latitude'].max():.4f}]")
-    print(f"  Lon range  : [{df['longitude'].min():.4f}, {df['longitude'].max():.4f}]")
-    print()
-    print(df.dtypes.to_string())
-
-    return df
+    for name, frames, t in (("L01 (January)", l01_frames, l01), ("L02 (July)", l02_frames, l02)):
+        summary = year_summary(frames, t)
+        print()
+        print(f"  {name}: {len(t)} transitions across {t['plot_id'].nunique()} plots")
+        print(summary.to_string(float_format=lambda v: f"{v:.3f}"))
+        if summary["rate_mismatches"].sum():
+            raise ValueError(f"{name}: computed changes disagree with MLIT's published rate.")
+    return {"L01": l01, "L02": l02, "common_sites": common}
 
 
 if __name__ == "__main__":
